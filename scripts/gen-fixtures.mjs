@@ -32,6 +32,11 @@ const steps = [
     config: { template: "Went through the unread inbox." }, next: [] },
 ];
 
+await c.callTool({ name: "circuit_bind", arguments: { tools: [
+  { name: "Gmail:search_threads" }, { name: "Gmail:reply" }, { name: "Gmail:label_thread" },
+  { name: "Google_Calendar:list_events" },
+] } });
+
 const design = await c.callTool({ name: "circuit_design", arguments: {
   name: "Inbox triage & reply", description: "Sorts unread mail and drafts the easy replies.", steps } });
 const wfId = design.structuredContent.workflow.id;
@@ -57,8 +62,23 @@ while (d && d.act !== "done" && d.act !== "blocked" && guard++ < 30) {
   d = res.structuredContent.directive;
 }
 
+/* a board with one connector that isn't there, for the "unbound" scene */
+const broken = await c.callTool({ name: "circuit_design", arguments: {
+  name: "Weekly digest", description: "Rounds up the week and posts it.",
+  steps: [
+    { id: "friday", type: "trigger.schedule", title: "Every Friday at five",
+      config: { cron: "0 22 * * 5", note: "Fridays at 5pm" }, next: [{ port: "out", to: "gather" }] },
+    { id: "gather", type: "tool.call", title: "Pull the week's threads",
+      config: { tool: "Gmail:search_threads", arguments: { q: "newer_than:7d" } }, next: [{ port: "out", to: "digest" }] },
+    { id: "digest", type: "model.write", title: "Write the digest",
+      config: { instructions: "Summarise the week in five bullets.", maxWords: 180 }, next: [{ port: "out", to: "post" }] },
+    { id: "post", type: "tool.call", title: "Post it to the team",
+      config: { tool: "Slack:post_msg", arguments: { channel: "#general", text: "{{steps.digest.text}}" } }, next: [] },
+  ],
+} });
+
 writeFileSync("scripts/fixtures.json", JSON.stringify({
-  design, held: held ?? res, run: res, afterMove: design,
+  design, held: held ?? res, run: res, afterMove: design, broken,
 }, null, 1));
 console.log("fixtures written · workflow", wfId, "· final", JSON.stringify(d));
 await c.close();

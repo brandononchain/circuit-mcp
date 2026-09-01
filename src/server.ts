@@ -8,6 +8,7 @@ import { BY_TYPE, catalog } from "./registry.js";
 import { describe, toBoard } from "./board.js";
 import { getStore } from "./store/index.js";
 import { advance, newRun, report, type Directive } from "./engine/run.js";
+import { checkTools, describeMissing, requiredTools, type ToolBinding } from "./tools.js";
 
 export const APP_URI = "ui://circuit/board.html";
 export const APP_MIME = "text/html;profile=mcp-app";
@@ -27,6 +28,9 @@ board inside this conversation, and then drives you one step at a time.
 
 How to use it:
  1. circuit_catalog once, to see the step types and their config keys.
+ 1b. circuit_bind once per conversation, reporting the connector tools you can actually see. Circuit
+    checks every step against that list, so a mistyped tool name becomes an error while you are still
+    drawing instead of a dead end halfway through a run.
  2. circuit_design with the WHOLE workflow in one call. The board draws each chip as your arguments
     stream in, so one well-ordered call looks far better than several small ones. For a tool.call step,
     put the exact name of a tool from YOUR OWN tool list in config.tool — Gmail, Slack, Airtable,
@@ -43,7 +47,7 @@ before a directive reaches you — never fill them in yourself.`;
 export function buildServer(workspace: string): McpServer {
   const store = getStore();
   const server = new McpServer(
-    { name: "circuit", version: "0.2.0", title: "Circuit" },
+    { name: "circuit", version: "0.3.0", title: "Circuit" },
     { instructions: INSTRUCTIONS },
   );
 
@@ -92,6 +96,59 @@ export function buildServer(workspace: string): McpServer {
     return say(all.map((w) => `${w.id}  ${w.status.padEnd(5)}  ${w.name}  (${w.steps.length} steps)`).join("\n"));
   });
 
+  /* ---------------------------------------------------------- connectors -- */
+
+  server.registerTool("circuit_bind", {
+    title: "Report the connectors you have",
+    description:
+      "Tell Circuit which connector tools you can actually call, so it can check workflows against " +
+      "reality. Send the EXACT names as they appear in your own tool list — every tool from every " +
+      "connector the user has, not just the ones you think this workflow needs. Call this once per " +
+      "conversation before designing, and again if the user connects something new. Circuit stores " +
+      "only the names you send; it never calls them.",
+    inputSchema: {
+      tools: z.array(z.object({
+        name: z.string().describe("Exact tool name, e.g. 'Gmail:send_message'."),
+        hint: z.string().optional().describe("A few words on what it does, so Circuit can suggest it later."),
+      })).min(1).describe("Every connector tool you can see."),
+    },
+  }, async ({ tools }) => {
+    const seen = new Map<string, { name: string; hint?: string }>();
+    for (const t of tools) if (t.name?.trim()) seen.set(t.name.trim(), { name: t.name.trim(), hint: t.hint });
+    const binding: ToolBinding = { workspace, boundAt: now(), tools: [...seen.values()] };
+    await store.putTools(binding);
+
+    const services = [...new Set(binding.tools.map((t) => t.name.split(/[:.]/)[0]))];
+    const drafts = await store.listWorkflows(workspace);
+    const broken = drafts
+      .map((wf) => ({ wf, check: checkTools(wf.steps, binding) }))
+      .filter((x) => x.check.missing.length);
+    return say(
+      `Bound ${binding.tools.length} tools across ${services.length} connectors: ${services.join(", ")}.` +
+      (broken.length
+        ? `\n\nHeads up — ${broken.length} saved workflow${broken.length === 1 ? "" : "s"} now fail${broken.length === 1 ? "s" : ""} this check:\n` +
+          broken.map((b) => `${b.wf.id} (${b.wf.name})\n${describeMissing(b.check)}`).join("\n")
+        : ""),
+    );
+  });
+
+  server.registerTool("circuit_tools", {
+    title: "Show the connectors on file",
+    description: "What Circuit believes you can call, and when you last told it.",
+    inputSchema: {},
+    annotations: { readOnlyHint: true },
+  }, async () => {
+    const b = await store.getTools(workspace);
+    if (!b) return say("No tool list on file. Call circuit_bind so Circuit can check workflows against what you actually have.");
+    const by = new Map<string, string[]>();
+    for (const t of b.tools) {
+      const [svc, ...rest] = t.name.split(/[:.]/);
+      by.set(svc, [...(by.get(svc) ?? []), rest.join(".") || t.name]);
+    }
+    const lines = [...by.entries()].map(([svc, actions]) => `${svc}  (${actions.length})  ${actions.join(", ")}`);
+    return say(`${b.tools.length} tools, bound ${b.boundAt}.\n\n${lines.join("\n")}`);
+  });
+
   /* -------------------------------------------------------------- design -- */
 
   server.registerTool("circuit_design", {
@@ -126,13 +183,20 @@ export function buildServer(workspace: string): McpServer {
       updatedAt: now(),
     };
     await store.putWorkflow(wf);
-    const tools = [...new Set(wf.steps.map((s) => s.config?.tool).filter(Boolean))] as string[];
-    return ok(
-      describe(wf) +
-      (tools.length ? `\n\nConnector tools this needs: ${tools.join(", ")}. Confirm each one is in your tool list.` : "") +
-      `\n\nShow the user the board, then circuit_run when they're ready.`,
-      toBoard(wf, null, { phase: "design", tools }),
-    );
+    const binding = await store.getTools(workspace);
+    const check = checkTools(wf.steps, binding);
+    const needs = [...new Set(requiredTools(wf.steps).map((t) => t.tool))];
+
+    // The board is saved either way — the wrong chips are easier to see than to
+    // describe, and they are marked on the canvas. Running is what gets blocked.
+    const note = check.missing.length
+      ? `\n\n${describeMissing(check)}\nThe board is saved and those steps are flagged on it. ` +
+        `Fix them with circuit_patch; circuit_run will refuse until you do.`
+      : !check.bound && needs.length
+        ? `\n\nConnector tools this needs: ${needs.join(", ")}. No tool list on file — call circuit_bind ` +
+          `so Circuit can check these for you.`
+        : `\n\nEvery connector it needs is one you have. Show the user the board, then circuit_run.`;
+    return ok(describe(wf) + note, toBoard(wf, null, { phase: "design", tools: check }));
   });
 
   server.registerTool("circuit_open", {
@@ -192,7 +256,11 @@ export function buildServer(workspace: string): McpServer {
     wf.steps = layout(wf.steps, wf.entry);
     wf.version += 1; wf.updatedAt = now();
     await store.putWorkflow(wf);
-    return ok(describe(wf), toBoard(wf, null, { phase: "design" }));
+    const check = checkTools(wf.steps, await store.getTools(workspace));
+    return ok(
+      describe(wf) + (check.missing.length ? `\n\n${describeMissing(check)}` : ""),
+      toBoard(wf, null, { phase: "design", tools: check }),
+    );
   });
 
   /* ----------------------------------------------------------------- run -- */
@@ -219,10 +287,25 @@ export function buildServer(workspace: string): McpServer {
   }, async ({ workflowId, mode, trigger }) => {
     const wf = await load(workflowId);
     if (!wf) return oops(`No workflow ${workflowId}.`);
+
+    const binding = await store.getTools(workspace);
+    const check = checkTools(wf.steps, binding);
+    if (check.missing.length) {
+      return oops(
+        `This workflow will not run as written.\n\n${describeMissing(check)}\n\n` +
+        `Nothing has started. Fix the tool names with circuit_patch and call circuit_run again.`,
+      );
+    }
     const run = newRun(wf, trigger ?? {}, mode);
     const d = advance(wf, run);
     await store.putRun(run);
-    return withDirective(wf, run, d);
+    const unchecked = !check.bound && check.present.length
+      ? `\n\nNo tool list on file, so Circuit could not check the ${check.present.length} connector ` +
+        `tool${check.present.length === 1 ? "" : "s"} this needs. Call circuit_bind if a directive names ` +
+        `something you cannot call.`
+      : "";
+    const res = withDirective(wf, run, d);
+    return { ...res, content: [{ type: "text" as const, text: res.content[0].text + unchecked }] };
   });
 
   server.registerTool("circuit_step", {

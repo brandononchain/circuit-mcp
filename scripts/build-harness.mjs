@@ -14,7 +14,7 @@ a{color:#D2A24E;text-decoration:none;margin-right:10px}
 pre{margin:0;font:11px ui-monospace,monospace;color:#6B7A77;white-space:pre-wrap}
 iframe{width:100%;border:0;height:820px;display:block;background:transparent}</style></head><body>
 <div class="hdr"><b style="color:#E8EEEB">host harness</b>
-<span><a href="?scene=build">build</a><a href="?scene=run">run</a><a href="?scene=held">held</a></span>
+<span><a href="?scene=build">build</a><a href="?scene=run">run</a><a href="?scene=held">held</a><a href="?scene=broken">unbound</a></span>
 <span><a href="?scene=held&theme=light">light</a></span>
 <pre id="hostlog"></pre></div>
 <iframe id="view" sandbox="allow-scripts allow-same-origin"></iframe>

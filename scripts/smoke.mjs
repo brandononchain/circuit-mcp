@@ -47,6 +47,16 @@ const steps = [
     config: { template: "Went through the unread inbox." }, next: [] },
 ];
 
+/* ---- tool binding: the guard that makes a mistyped connector a design error ---- */
+const bind = await client.callTool({ name: "circuit_bind", arguments: { tools: [
+  { name: "Gmail:search_threads", hint: "find threads by query" },
+  { name: "Gmail:reply", hint: "reply in a thread" },
+  { name: "Gmail:label_thread", hint: "add a label" },
+  { name: "Google_Calendar:list_events", hint: "read the calendar" },
+  { name: "Slack:send_message" },
+] } });
+console.log("\n--- circuit_bind ---\n" + bind.content[0].text);
+
 const design = await client.callTool({
   name: "circuit_design",
   arguments: { name: "Inbox triage & reply", description: "Sorts unread mail and drafts the easy replies.", steps },
@@ -81,6 +91,28 @@ console.log("\n--- final board ---\n" + res.content[0].text.split("\n--- do this
 
 const bad = await client.callTool({ name: "circuit_design", arguments: { name: "x", steps: [{ id: "a", type: "slack.post", title: "nope", next: [] }] } });
 console.log("\nunknown type guard:", bad.isError, "|", bad.content[0].text);
+
+/* a plausible-but-wrong tool name should be caught while drawing, with a suggestion */
+const typo = await client.callTool({ name: "circuit_design", arguments: {
+  name: "Typo check",
+  steps: [
+    { id: "go", type: "trigger.ask", title: "When I ask", config: {}, next: [{ port: "out", to: "send" }] },
+    { id: "send", type: "tool.call", title: "Send it",
+      config: { tool: "Gmail:send_reply", arguments: {} }, next: [] },
+  ],
+} });
+console.log("\n--- mistyped tool ---\n" + typo.content[0].text.split("\n").slice(-5).join("\n"));
+console.log("chip flagged:", JSON.stringify(typo.structuredContent.workflow.steps.find(s => s.id === "send").toolKnown));
+
+const typoId = typo.structuredContent.workflow.id;
+const blocked = await client.callTool({ name: "circuit_run", arguments: { workflowId: typoId } });
+console.log("run refused:", blocked.isError, "|", blocked.content[0].text.split("\n")[0]);
+
+const fixed = await client.callTool({ name: "circuit_patch", arguments: { workflowId: typoId,
+  ops: [{ op: "update_step", stepId: "send", config: { tool: "Gmail:reply" } }] } });
+console.log("after patch, flagged:", JSON.stringify(fixed.structuredContent.workflow.steps.find(s => s.id === "send").toolKnown));
+const nowRuns = await client.callTool({ name: "circuit_run", arguments: { workflowId: typoId } });
+console.log("run accepted:", !nowRuns.isError, "|", JSON.stringify(nowRuns.structuredContent.directive?.act));
 const wrongStep = await client.callTool({ name: "circuit_step", arguments: { runId, stepId: "send", result: {} } });
 console.log("out-of-order guard:", JSON.stringify(wrongStep.structuredContent.directive));
 

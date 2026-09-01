@@ -25,7 +25,7 @@ Three things make it work.
 
 **It streams.** While Claude is still emitting the `circuit_design` call, the host forwards `ui/notifications/tool-input-partial`. Each time a step object closes in the partial JSON, the board places that chip. The build animation is the model's output arriving — not a canned sequence.
 
-**It owns nothing.** Circuit has no Gmail integration, no OAuth flow, no API keys, no secrets at rest. A step just names a tool from *your* tool list — `Gmail:search_threads`, `Slack:send_message`, `Airtable:create_records_for_table` — and Claude makes the call. Anything you can connect to Claude, Circuit can orchestrate on day one.
+**It owns nothing.** Circuit has no Gmail integration, no OAuth flow, no API keys, no secrets at rest. A step just names a tool from *your* tool list — `Gmail:search_threads`, `Slack:send_message`, `Airtable:create_records_for_table` — and Claude makes the call. Anything you can connect to Claude, Circuit can orchestrate on day one. Claude tells Circuit once what it can reach, and from then on a wrong tool name is caught while the board is still being drawn.
 
 **It drives.** At run time Circuit is a state machine, not an executor. `circuit_run` hands Claude exactly one directive; Claude does that one thing and reports back with `circuit_step`; the board updates and the next directive comes out. Branching, filtering and looping never leave the server, so a nine-step workflow with a loop is nine deterministic hops instead of one long improvisation.
 
@@ -70,6 +70,26 @@ Claude calls its own Gmail tool, reports the threads, and Circuit hands back the
 The run stops. You edit the draft in the box and press **Approve & continue** — the board calls back into the server, the edited text replaces the draft in the run data, and the next directive is the send, with your words in it. Then the loop turns over and does the next thread.
 
 <img src="docs/board-run-light.png" alt="A completed run, light theme" width="100%">
+
+## Connectors are checked, not assumed
+
+Naming a tool as a plain string has one sharp edge: get the string wrong and nothing complains until a run is halfway through and a directive points at something Claude cannot call.
+
+`circuit_bind` closes it. Claude reports the tools it actually has, once; Circuit remembers them and checks every step against that list — the same treatment an unknown *step type* already gets, extended to connectors.
+
+<img src="docs/board-unbound.png" alt="A board with one connector that isn't there" width="100%">
+
+The step is saved either way — a wrong chip is much easier to see than to describe — but it is marked on the board, listed in the console, and `circuit_run` refuses to start until it's fixed:
+
+```
+One step names a connector tool you do not have:
+  post: 'Slack:post_msg' is not in your tool list — did you mean 'Slack:send_message'?
+Fix the tool names, or call circuit_bind again if the user has connected something since.
+```
+
+Suggestions come from bigram similarity weighted toward the connector: a near-miss inside `Gmail:` scores far above a closer spelling in some other service, because that is almost always what happened. If nothing scores well enough, you get no suggestion rather than a confident wrong one.
+
+Binding is optional. Without it Circuit says plainly that it could not check, and gets out of the way.
 
 ---
 
@@ -158,6 +178,8 @@ Thirteen tools, one capability each. Three are invisible to the model.
 | Tool | Visible to | What it does |
 | --- | --- | --- |
 | `circuit_catalog` | model | Step types and their config keys. Read before designing. |
+| `circuit_bind` | model | Reports the connector tools Claude can actually call. |
+| `circuit_tools` | model | What Circuit believes you can reach, and when it was told. |
 | `circuit_design` | model + app | Draws a whole workflow. **Streams.** |
 | `circuit_patch` | model + app | Edits an existing board without discarding your layout. |
 | `circuit_open` · `circuit_list` | model | Reads. |
@@ -245,7 +267,7 @@ Hand-rolling a protocol is only defensible if you verify it against the real thi
 ```bash
 npm run dev        # server on :8787, rebuilds the app on change
 npm run harness    # builds the app + a local host with real fixtures
-open scripts/harness.html      # ?scene=build | run | held   &theme=light
+open scripts/harness.html      # ?scene=build | run | held | broken   &theme=light
 npm run typecheck
 ```
 
@@ -290,11 +312,13 @@ There is deliberately no third row. Circuit stores workflows and run history; it
 
 ## Roadmap
 
+- [x] Connector binding, so a mistyped tool is a design-time error
+- [ ] Failure handling: an `error` port, per-step retry, and a resumable run
+- [ ] A test mode that actually withholds writes rather than just labelling the run
 - [ ] Wire editing on the canvas — drag from a port to a chip
 - [ ] Run replay: scrub a past run and watch the payload move
 - [ ] `logic.parallel`, for fan-out that does not need ordering
 - [ ] A workflow export/import format, so boards are shareable outside Claude
-- [ ] Per-step retry policy and a visible failure state on the chip
 
 ## Contributing
 

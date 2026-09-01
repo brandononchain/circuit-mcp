@@ -5,7 +5,7 @@ type Wire = { port: string; to: string };
 type Chip = {
   id: string; type: string; kind: string; label?: string; actor?: string;
   title: string; summary: string; config?: Record<string, unknown>;
-  tool?: string | null; ports: string[]; next: Wire[]; enabled: boolean;
+  tool?: string | null; toolKnown?: boolean | null; ports: string[]; next: Wire[]; enabled: boolean;
   position: { col: number; lane: number };
 };
 type Directive = {
@@ -18,7 +18,7 @@ type Board = {
   run: { id: string; status: string; mode: string; trace: Trace[]; awaiting: { stepId: string; act: string } | null } | null;
   storage?: string;
   phase?: string;
-  tools?: string[];
+  tools?: { bound: boolean; missing: { stepId: string; tool: string; suggestion?: string }[]; present: string[] };
   directive?: Directive | null;
 };
 
@@ -86,9 +86,19 @@ app.h.ontoolresult = (p: any) => {
     if (d?.act === "blocked") logLines.push(`${pad("✕", 14)}${d.reason ?? "blocked"}`);
   } else {
     consoleState = { label: wf.name, sub: `${wf.steps.length} steps · ${wf.status}`, busy: false };
-    logLines = board.tools?.length
-      ? [`needs these connector tools:`, ...board.tools.map((t) => `  ${t}`)]
-      : wf.steps.map((s) => `${pad(s.id, 14)}${s.type}`);
+    const tools = board.tools;
+    if (tools?.missing?.length) {
+      consoleState = { label: "connectors", sub: `${tools.missing.length} not connected`, busy: false };
+      logLines = tools.missing.map((m) =>
+        `${pad(m.stepId, 14)}${m.tool}${m.suggestion ? `  \u2192 try ${m.suggestion}` : ""}`);
+    } else if (tools && !tools.bound && tools.present.length) {
+      consoleState = { label: wf.name, sub: "connectors unchecked", busy: false };
+      logLines = ["needs these connector tools:", ...tools.present.map((t) => `  ${t}`)];
+    } else if (tools?.present?.length) {
+      logLines = ["all connectors check out:", ...tools.present.map((t) => `  ${t}`)];
+    } else {
+      logLines = wf.steps.map((s) => `${pad(s.id, 14)}${s.title}`);
+    }
   }
   render();
 };
@@ -175,6 +185,9 @@ function inspectorHtml() {
     <dt>step</dt><dd><code>${esc(c.id)}</code> \u00b7 <code>${esc(c.type)}</code></dd>
     <dt>done by</dt><dd>${esc(who)}</dd>
     ${c.ports.length > 1 ? `<dt>ports</dt><dd><code>${c.ports.map(esc).join(" \u00b7 ")}</code></dd>` : ""}
+    ${c.tool ? `<dt>connector</dt><dd><code>${esc(c.tool)}</code>${
+      c.toolKnown === false ? ' \u00b7 <span class="warn">not in your tool list</span>'
+      : c.toolKnown === true ? ' \u00b7 checked' : ""}</dd>` : ""}
     ${t && t.state !== "idle" ? `<dt>last run</dt><dd>${esc(t.summary || t.error || t.state)}</dd>` : ""}
     <dt>settings</dt><dd><pre>${esc(cfg === "{}" ? "nothing to configure" : cfg)}</pre></dd>
   </dl></div>`;
@@ -195,8 +208,10 @@ function chipHtml(c: Partial<Chip>, i: number, state = "idle", label = "") {
 
   const actor = c.actor ?? "claude";
   const waiting = board?.run?.awaiting?.stepId === c.id;
+  const unbound = c.toolKnown === false;
   const cls = ["node", state === "idle" ? "" : state, waiting ? "waiting" : "",
-    c.enabled === false ? "muted" : "", selected === c.id ? "sel" : ""].join(" ");
+    unbound ? "unbound" : "", c.enabled === false ? "muted" : "",
+    selected === c.id ? "sel" : ""].join(" ");
 
   // "Gmail · search threads" reads better with the service carrying the weight
   const [head, ...tail] = String(c.summary ?? "").split(" · ");
@@ -207,7 +222,8 @@ function chipHtml(c: Partial<Chip>, i: number, state = "idle", label = "") {
   return `<div class="${cls}" data-id="${esc(c.id!)}" style="left:${x}px;top:${y}px">
     <div class="nh"><span class="p1 by-${esc(actor)}" title="${esc(DOES[actor] ?? "")}"></span>
       <span class="lab nk">${esc(c.label ?? kindOf(c.type ?? ""))}</span>
-      ${label ? `<span class="ns">${esc(label)}</span>` : ""}</div>
+      ${unbound ? `<span class="ns bad">not connected</span>`
+        : label ? `<span class="ns">${esc(label)}</span>` : ""}</div>
     <div class="nb"><p class="nt">${esc(c.title ?? c.id)}</p>
       <p class="nc">${summary}</p>${ports}</div>
   </div>`;

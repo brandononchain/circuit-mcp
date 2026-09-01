@@ -1,4 +1,5 @@
 import type { Run, Workflow } from "../graph.js";
+import type { ToolBinding } from "../tools.js";
 import { MemoryStore } from "./memory.js";
 import { SupabaseStore } from "./supabase.js";
 
@@ -18,6 +19,10 @@ export interface Store {
   putRun(run: Run): Promise<Run>;
   getRun(workspace: string, id: string): Promise<Run | null>;
   listRuns(workspace: string, workflowId?: string, limit?: number): Promise<Run[]>;
+
+  /** the connector tools Claude reported it can see, per workspace */
+  putTools(binding: ToolBinding): Promise<void>;
+  getTools(workspace: string): Promise<ToolBinding | null>;
 
   putCredential(workspace: string, provider: string, cred: Credential): Promise<void>;
   getCredential(workspace: string, provider: string): Promise<Credential | null>;

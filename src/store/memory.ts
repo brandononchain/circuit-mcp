@@ -1,11 +1,13 @@
 import type { Run, Workflow } from "../graph.js";
 import type { Credential, Store } from "./index.js";
+import type { ToolBinding } from "../tools.js";
 
 const g = globalThis as any;
-g.__circuit ??= { wf: new Map(), runs: new Map(), creds: new Map(), seen: new Map() };
+g.__circuit ??= { wf: new Map(), runs: new Map(), creds: new Map(), seen: new Map(), tools: new Map() };
 const db = g.__circuit as {
   wf: Map<string, Workflow>; runs: Map<string, Run>;
   creds: Map<string, Credential>; seen: Map<string, number>;
+  tools: Map<string, ToolBinding>;
 };
 
 const k = (a: string, b: string) => `${a}::${b}`;
@@ -27,6 +29,9 @@ export class MemoryStore implements Store {
       .filter((r) => r.workspace === ws && (!workflowId || r.workflowId === workflowId))
       .sort((a, b) => b.startedAt.localeCompare(a.startedAt)).slice(0, limit);
   }
+
+  async putTools(binding: ToolBinding) { db.tools.set(binding.workspace, binding); }
+  async getTools(ws: string) { return db.tools.get(ws) ?? null; }
 
   async putCredential(ws: string, p: string, c: Credential) { db.creds.set(k(ws, p), c); }
   async getCredential(ws: string, p: string) { return db.creds.get(k(ws, p)) ?? null; }

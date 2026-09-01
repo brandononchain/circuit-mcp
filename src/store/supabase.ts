@@ -1,5 +1,6 @@
 import type { Run, Workflow } from "../graph.js";
 import type { Credential, Store } from "./index.js";
+import type { ToolBinding } from "../tools.js";
 
 /**
  * PostgREST over fetch. The supabase-js client would pull in auth, realtime and
@@ -70,6 +71,16 @@ export class SupabaseStore implements Store {
     const wf = workflowId ? `&workflow_id=eq.${enc(workflowId)}` : "";
     const r = await this.rest(`circuit_runs?workspace=eq.${enc(ws)}${wf}&select=doc&order=started_at.desc&limit=${limit}`);
     return (r ?? []).map((x: any) => x.doc as Run);
+  }
+
+  async putTools(binding: ToolBinding) {
+    await this.upsert("circuit_tools", {
+      workspace: binding.workspace, bound_at: binding.boundAt, doc: binding,
+    });
+  }
+  async getTools(ws: string) {
+    const r = await this.rest(`circuit_tools?workspace=eq.${enc(ws)}&select=doc&limit=1`);
+    return (r?.[0]?.doc as ToolBinding) ?? null;
   }
 
   async putCredential(ws: string, provider: string, cred: Credential) {

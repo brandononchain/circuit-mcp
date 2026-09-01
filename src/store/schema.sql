@@ -26,6 +26,12 @@ create table if not exists circuit_credentials (
   primary key (workspace, provider)
 );
 
+create table if not exists circuit_tools (
+  workspace text primary key,
+  bound_at timestamptz not null default now(),
+  doc jsonb not null
+);
+
 create table if not exists circuit_seen (
   workspace text not null,
   key text not null,
@@ -36,5 +42,6 @@ create table if not exists circuit_seen (
 alter table circuit_workflows enable row level security;
 alter table circuit_runs enable row level security;
 alter table circuit_credentials enable row level security;
+alter table circuit_tools enable row level security;
 alter table circuit_seen enable row level security;
 -- no policies: only the service role key reaches these tables

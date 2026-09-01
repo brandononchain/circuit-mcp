@@ -72,6 +72,10 @@ button.ghost{background:transparent}
 .node.done{border-color:color-mix(in srgb,var(--ok) 55%,var(--edge))}
 .node.held{border-color:var(--wait);border-style:dashed}
 .node.failed{border-color:var(--fault)}
+.node.unbound{border-color:color-mix(in srgb,var(--fault) 62%,var(--edge));
+  background:color-mix(in srgb,var(--fault) 5%,var(--chip))}
+.node.unbound .nh{background:color-mix(in srgb,var(--fault) 9%,var(--chip-head))}
+.ns.bad{color:var(--fault);background:color-mix(in srgb,var(--fault) 14%,transparent)}
 .node.skipped,.node.muted{opacity:.42}
 .node.dragging{cursor:grabbing;z-index:9}
 .nh{display:flex;align-items:center;gap:7px;padding:6px 9px 5px 12px;background:var(--chip-head);
@@ -118,6 +122,7 @@ pre.log b{font-weight:400;color:var(--accent)} pre.log i{font-style:normal;color
 .insp dt{font-size:9.5px;letter-spacing:.13em;text-transform:uppercase;font-weight:600;color:var(--ink-3)}
 .insp dd{margin:0;font-size:11.5px}
 .insp code{font-family:"Spline Sans Mono",monospace;font-size:11px;color:var(--ink-2)}
+.insp .warn{color:var(--fault)}
 .insp pre{margin:4px 0 0;font-family:"Spline Sans Mono",monospace;font-size:10.5px;line-height:1.55;
   color:var(--ink-3);white-space:pre-wrap;word-break:break-word;max-height:52px;overflow:hidden}
 

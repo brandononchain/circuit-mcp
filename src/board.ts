@@ -4,6 +4,9 @@ import { storeKind } from "./store/index.js";
 
 /** Everything the canvas needs to draw itself. Kept small on purpose. */
 export function toBoard(wf: Workflow, run?: Run | null, extra: Record<string, unknown> = {}) {
+  // when a tool check came with the call, mark the chips it found fault with
+  const check = extra.tools as { bound?: boolean; missing?: { stepId: string }[] } | undefined;
+  const unbound = new Set((check?.missing ?? []).map((m) => m.stepId));
   return {
     workflow: {
       id: wf.id,
@@ -20,6 +23,7 @@ export function toBoard(wf: Workflow, run?: Run | null, extra: Record<string, un
         title: s.title,
         summary: summarise(s),
         tool: toolOf(s),
+        toolKnown: !toolOf(s) ? null : check?.bound ? !unbound.has(s.id) : null,
         ports: portsOf(s),
         next: s.next,
         enabled: s.enabled !== false,
