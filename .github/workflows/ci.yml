@@ -26,3 +26,12 @@ jobs:
             sleep 1
           done
           node scripts/smoke.mjs
+          node scripts/protocol-check.mjs
+          node scripts/export-check.mjs
+      - name: the stdio build
+        run: node scripts/stdio-check.mjs
+      - name: the oauth flow
+        run: |
+          PORT=8788 PUBLIC_BASE_URL=http://localhost:8788 CIRCUIT_OWNER_KEY=ci-owner-key npm run dev &
+          for i in $(seq 1 30); do curl -sf http://localhost:8788/health > /dev/null && break; sleep 1; done
+          CIRCUIT_OWNER_KEY=ci-owner-key URL=http://localhost:8788 node scripts/oauth-check.mjs

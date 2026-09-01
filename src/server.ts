@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { z } from "zod";
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { McpServer, ResourceTemplate } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { completable } from "@modelcontextprotocol/sdk/server/completable.js";
 
 import { BOARD_HTML } from "./app/board.generated.js";
 import { InputSchema, StepSchema, findEntry, layout, type Run, type Workflow } from "./graph.js";
@@ -52,9 +53,10 @@ before a directive reaches you — never fill them in yourself.`;
 export function buildServer(workspace: string): McpServer {
   const store = getStore();
   const server = new McpServer(
-    { name: "circuit", version: "0.7.0", title: "Circuit" },
+    { name: "circuit", version: "0.8.0", title: "Circuit" },
     { instructions: INSTRUCTIONS },
   );
+
 
   /* ------------------------------------------------------------- the app -- */
 
@@ -93,6 +95,139 @@ export function buildServer(workspace: string): McpServer {
     }
     return map;
   }
+
+  /* ------------------------------------------------------------ resources -- */
+
+  // Workflows and runs are readable as resources, so a client can browse what is
+  // here rather than having to call a tool to find out.
+  server.registerResource(
+    "Workflow",
+    new ResourceTemplate("circuit://workflow/{id}", {
+      list: async () => ({
+        resources: (await store.listWorkflows(workspace)).map((w) => ({
+          uri: `circuit://workflow/${w.id}`,
+          name: w.name,
+          description: w.description || `${w.steps.length} steps, ${w.status}`,
+          mimeType: "application/json",
+        })),
+      }),
+      complete: {
+        id: async (value) => {
+          const all = await store.listWorkflows(workspace);
+          return all.map((w) => w.id).filter((id) => id.startsWith(value)).slice(0, 20);
+        },
+      },
+    }),
+    { title: "A saved workflow", description: "The definition, as circuit_export writes it.", mimeType: "application/json" },
+    async (uri, { id }) => {
+      const wf = await load(String(id));
+      if (!wf) throw new Error(`No workflow ${id}.`);
+      return { contents: [{ uri: uri.href, mimeType: "application/json", text: JSON.stringify({
+        circuit: 1, name: wf.name, description: wf.description, entry: wf.entry,
+        inputs: wf.inputs ?? [], schedule: wf.schedule, steps: wf.steps,
+      }, null, 1) }] };
+    },
+  );
+
+  server.registerResource(
+    "Run",
+    new ResourceTemplate("circuit://run/{id}", {
+      list: async () => ({
+        resources: (await store.listRuns(workspace, undefined, 20)).map((r) => ({
+          uri: `circuit://run/${r.id}`,
+          name: `${r.id} — ${r.status}`,
+          description: `${r.mode} run of ${r.workflowId}, started ${r.startedAt}`,
+          mimeType: "application/json",
+        })),
+      }),
+      complete: {
+        id: async (value) => {
+          const runs = await store.listRuns(workspace, undefined, 40);
+          return runs.map((r) => r.id).filter((id) => id.startsWith(value)).slice(0, 20);
+        },
+      },
+    }),
+    { title: "A run", description: "Status, the trace, and the timeline a replay scrubs.", mimeType: "application/json" },
+    async (uri, { id }) => {
+      const run = await store.getRun(workspace, String(id));
+      if (!run) throw new Error(`No run ${id}.`);
+      return { contents: [{ uri: uri.href, mimeType: "application/json", text: JSON.stringify({
+        id: run.id, workflowId: run.workflowId, status: run.status, mode: run.mode,
+        startedAt: run.startedAt, endedAt: run.endedAt, trace: run.trace, history: run.history ?? [],
+      }, null, 1) }] };
+    },
+  );
+
+  /* -------------------------------------------------------------- prompts -- */
+
+  server.registerPrompt("circuit-build", {
+    title: "Build an automation",
+    description: "Design a workflow on the board from a plain description of what should happen.",
+    argsSchema: {
+      what: z.string().describe("What should happen, in your own words."),
+    },
+  }, ({ what }) => ({
+    messages: [{
+      role: "user", content: { type: "text", text:
+        `Build this automation with Circuit: ${what}
+
+` +
+        `Call circuit_catalog and circuit_bind first, then design the whole thing in one circuit_design ` +
+        `call so I can watch the board draw itself. Use tools from my own connectors only, declare an ` +
+        `input for anything that would otherwise be hardcoded, and put an approval gate in front of ` +
+        `anything that sends. Show me the board before running it.`,
+      },
+    }],
+  }));
+
+  server.registerPrompt("circuit-open", {
+    title: "Open a workflow",
+    description: "Put a saved workflow back on the board.",
+    argsSchema: {
+      workflowId: completable(z.string().describe("Which workflow."), async (value) => {
+        const all = await store.listWorkflows(workspace);
+        return all.map((w) => w.id).filter((id) => id.startsWith(value)).slice(0, 20);
+      }),
+    },
+  }, ({ workflowId }) => ({
+    messages: [{
+      role: "user", content: { type: "text", text:
+        `Open Circuit workflow ${workflowId} with circuit_open and show me the board. Tell me what it ` +
+        `does, what it needs, and whether anything is wrong with it.`,
+      },
+    }],
+  }));
+
+  server.registerPrompt("circuit-save", {
+    title: "Save a workflow",
+    description: "Write a workflow out as a page to keep.",
+    argsSchema: {
+      workflowId: completable(z.string().describe("Which workflow."), async (value) => {
+        const all = await store.listWorkflows(workspace);
+        return all.map((w) => w.id).filter((id) => id.startsWith(value)).slice(0, 20);
+      }),
+    },
+  }, ({ workflowId }) => ({
+    messages: [{
+      role: "user", content: { type: "text", text:
+        `Call circuit_export for workflow ${workflowId}, write the html it gives you to a file exactly ` +
+        `as returned, publish it as an artifact, and give me the link.`,
+      },
+    }],
+  }));
+
+  server.registerPrompt("circuit-check", {
+    title: "Check on my automations",
+    description: "Which armed workflows have quietly stopped firing.",
+    argsSchema: {},
+  }, () => ({
+    messages: [{
+      role: "user", content: { type: "text", text:
+        `Run circuit_health and tell me plainly whether anything I have armed has stopped working. ` +
+        `If something needs a scheduled task created, offer to walk me through it.`,
+      },
+    }],
+  }));
 
   /* ---------------------------------------------------------------- read -- */
 
@@ -745,6 +880,19 @@ export function buildServer(workspace: string): McpServer {
     await store.putRun(run);
     return withDirective(wf, run, d);
   });
+
+  // The SDK turns listChanged on for anything you register, but a stateless
+  // Streamable HTTP session has no channel to push a notification down. Claiming
+  // a capability that can never fire leaves a client waiting for something that
+  // is never coming, so it is withdrawn rather than left as a polite lie.
+  // (Restore it the day sessions become stateful, not before.)
+  const declared: any = (server.server as any).getCapabilities?.() ?? {};
+  (server.server as any)._capabilities = {
+    ...declared,
+    ...(declared.tools ? { tools: {} } : {}),
+    ...(declared.resources ? { resources: {} } : {}),
+    ...(declared.prompts ? { prompts: {} } : {}),
+  };
 
   return server;
 }

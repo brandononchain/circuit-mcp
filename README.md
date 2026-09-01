@@ -285,6 +285,76 @@ success is the one thing that defeats the entire mechanism.
 
 ---
 
+## What Circuit speaks
+
+Built on the official `@modelcontextprotocol/sdk`, negotiating protocol
+`2025-06-18`, with MCP Apps riding on top per SEP-1865 (`2026-01-26`).
+
+| | |
+| --- | --- |
+| **Tools** | 23 |
+| **Prompts** | `circuit-build` · `circuit-open` · `circuit-save` · `circuit-check` |
+| **Resources** | the `ui://` board, plus `circuit://workflow/{id}` and `circuit://run/{id}` |
+| **Completions** | workflow and run ids, on both the templates and the prompt arguments |
+| **Transports** | Streamable HTTP (stateless) and stdio |
+| **Auth** | OAuth 2.1 — metadata, dynamic registration, PKCE, refresh |
+
+Circuit advertises `tools`, `resources` and `prompts` **without** `listChanged`.
+The SDK turns that flag on for anything you register, but a stateless Streamable
+HTTP session has no channel to push a notification down, and a capability that
+can never fire leaves a client waiting for something that is never coming. It
+goes back on the day sessions become stateful, not before.
+
+### Running it locally over stdio
+
+```jsonc
+// claude_desktop_config.json
+{ "mcpServers": {
+    "circuit": { "command": "npx", "args": ["-y", "circuit-mcp"] } } }
+```
+
+Same server, same tools; the workspace comes from the environment rather than a
+token, because there is nobody else on the other end of a pipe.
+
+---
+
+## Signing in
+
+Set `CIRCUIT_OWNER_KEY` and Circuit becomes an OAuth 2.1 authorization server as
+well as a resource server. Leave it unset and the server runs open, which is what
+you want while developing and never what you want on the internet.
+
+```
+GET  /.well-known/oauth-protected-resource   →  where to authorize
+GET  /.well-known/oauth-authorization-server →  the endpoints
+POST /oauth/register                         →  dynamic client registration
+GET  /oauth/authorize                        →  consent, then the owner key
+POST /oauth/token                            →  code + PKCE, and refresh
+```
+
+**Nothing in the flow is stored.** The client registration, the authorization
+code and both tokens are signed blobs rather than database rows — which is not
+cleverness for its own sake: Circuit is built to run on serverless, where a cold
+start would otherwise lose a registration mid-handshake, and where "the auth
+server has state" quietly means you need a database before you can log in.
+
+The two places that would be wrong to fake are handled properly. Authorization
+codes are single-use, enforced by recording the id the first time it is redeemed.
+And revocation says what it actually does:
+
+```jsonc
+{ "revoked": false,
+  "detail": "Circuit's tokens are signed, not stored. Rotate CIRCUIT_SECRET to
+             invalidate every token at once." }
+```
+
+The identity is the deployment's owner key — one key, one workspace. That is the
+honest shape for something you host for yourself, and it leaves room for the real
+thing: the subject is already carried through every token, so adding accounts
+later changes who issues a subject, not how anything downstream reads one.
+
+---
+
 ## Quick start
 
 ```bash
@@ -474,7 +544,11 @@ npm run typecheck
 With the server running:
 
 ```bash
-node scripts/smoke.mjs
+node scripts/smoke.mjs        # the whole product, over the wire
+node scripts/protocol-check.mjs  # tools, prompts, resources, templates, completions
+node scripts/export-check.mjs    # export → import round trip, and every example
+node scripts/stdio-check.mjs     # the packaged stdio build
+CIRCUIT_OWNER_KEY=... node scripts/oauth-check.mjs   # the full OAuth flow
 ```
 
 That connects a real MCP client, lists the tools and their `_meta.ui` bindings, reads the `ui://` resource, designs a nine-step workflow with a loop and a gate, then **plays the part of Claude** — taking each directive, returning a plausible result, and checking that templates resolved, the loop turned over, the gate held, and the out-of-order guard fires.
@@ -497,7 +571,9 @@ Any Node 20 host works; `src/vercel.ts` is a nine-line adapter over the same `ha
 | Variable | What happens without it |
 | --- | --- |
 | `SUPABASE_URL` + `SUPABASE_SERVICE_ROLE_KEY` | Falls back to in-memory storage — fine locally, lossy on serverless. Run `src/store/schema.sql` once. |
-| `CIRCUIT_TOKENS` | `/mcp` is open and every caller shares the `local` workspace. Set it before exposing the server: `brandon=sometoken,team=othertoken`. |
+| `CIRCUIT_OWNER_KEY` | No OAuth: `/mcp` is open. Set it before exposing the server anywhere. |
+| `CIRCUIT_SECRET` | Signing falls back to a value derived from the owner key. Set it to rotate tokens independently of the key. |
+| `CIRCUIT_TOKENS` | Legacy bearer tokens, ignored once `CIRCUIT_OWNER_KEY` is set: `brandon=sometoken,team=othertoken`. |
 
 There is deliberately no third row. Circuit stores workflows and run history; it never stores anything belonging to a connector.
 
@@ -522,7 +598,8 @@ There is deliberately no third row. Circuit stores workflows and run history; it
 - [x] Save a workflow as an artifact you keep, and restore it anywhere
 - [x] Sub-workflows — one board calling another
 - [x] Scheduling that closes the loop, and a health check for silently dead workflows
-- [ ] Multi-user hosting and per-step failure rates
+- [x] OAuth 2.1, stdio, prompts, completions, resources
+- [ ] Multi-user accounts, and per-step failure rates on the chip
 
 The reasoning behind the order, and what Circuit deliberately will not do, is in
 [ROADMAP.md](ROADMAP.md).

@@ -24,23 +24,33 @@ Sequenced by what breaks first if you actually use it.
 | **Workflow inputs** | `{{input.…}}` declared on the workflow, asked for by `circuit_run`, so one board serves many cases. |
 | **Saved workflows** | `circuit_export` writes a standalone page to publish as an artifact; `circuit_import` reads a workflow back out of one. |
 | **Sub-workflows** | `flow.call` runs another board with its own step namespace and hands back what `returns` names. Cycles refused at design time. |
+| **A complete connector** | OAuth 2.1 with nothing stored, stdio alongside Streamable HTTP, prompts, resource templates for workflows and runs, and completions on both. |
 | **Checked scheduling** | `circuit_arm` hands over the exact prompt and asks for the task id; `circuit_health` says which armed workflows have quietly stopped firing. |
 
 ---
 
 ## Now
 
-### Multi-user hosting
+### Multi-user accounts
 
-One deployment serving a team rather than a person: OAuth on the server itself,
-per-user workspaces, and an invite path so a workflow can be handed over rather
-than re-imported.
+OAuth is in, but the identity is still a single owner key — one key, one
+workspace. Real accounts mean a subject that is a person rather than a
+deployment, an invite path so a workflow can be handed over rather than
+re-imported, and a decision about who can see whose runs.
 
-This is the only item on this roadmap that adds a credential to Circuit, and it
-is Circuit's own — never a connector's. That distinction is the whole product,
-so the implementation has to make it structurally impossible to drift: the
-workspace key unlocks workflow definitions and run history, and there is nothing
-else in the store for it to unlock.
+The token shape already carries a subject through every hop, so this is a change
+to who issues one, not to how anything downstream reads one. The thing to hold on
+to while doing it: the workspace key unlocks workflow definitions and run history,
+and there is nothing else in the store for it to unlock. That has to stay
+structurally true rather than merely currently true.
+
+### Stateful sessions, and getting listChanged back
+
+Circuit withdraws `listChanged` because a stateless session cannot deliver it.
+Sessions with real ids would let the board update itself when another
+conversation changes a workflow — which is exactly the kind of thing that makes a
+shared workspace feel alive, and exactly the kind of thing that needs sticky
+routing to work on serverless.
 
 ### Per-step failure rates
 
@@ -115,5 +125,6 @@ syntax.
 | **0.4** | Honest test mode, wire editing. |
 | **0.5** | Run replay, fan-out with a join. |
 | **0.6** | Concurrency, workflow inputs, saved workflows, starter examples. |
-| **0.7** | Sub-workflows, checked scheduling. *(current)* |
-| **1.0** | Multi-user hosting, per-step failure rates, a deployment someone else can run. |
+| **0.7** | Sub-workflows, checked scheduling. |
+| **0.8** | OAuth 2.1, stdio, prompts, resources, completions. *(current)* |
+| **1.0** | Multi-user accounts, stateful sessions, per-step failure rates. |
