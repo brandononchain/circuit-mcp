@@ -91,6 +91,31 @@ Suggestions come from bigram similarity weighted toward the connector: a near-mi
 
 Binding is optional. Without it Circuit says plainly that it could not check, and gets out of the way.
 
+## One board can call another
+
+`flow.call` runs a whole other workflow from inside this one and carries its
+result back. The sub-workflow gets its **own step namespace**, so ids can never
+collide, its own inputs, and its own `trigger` — only what `returns` names comes
+out:
+
+```jsonc
+{ "id": "sub", "type": "flow.call", "title": "Draft and approve",
+  "config": { "workflowId": "wf_09c583c7",
+              "input": { "who": "{{steps.find.threads.0.from}}" },
+              "returns": "steps.write.text" } }
+```
+
+Downstream, `{{steps.sub}}` is that text. Directives from inside the
+sub-workflow reach Claude exactly as they would at the top level, so a gate deep
+inside one still stops the whole run and asks.
+
+A workflow that calls itself — directly or round a longer loop — is refused
+while it's being drawn, naming where the loop closes:
+
+```
+wf_09c583c7 → wf_0e61662e → wf_09c583c7 calls itself.
+```
+
 ## Workflows you can keep
 
 A board lives in a conversation, and conversations end. `circuit_export` writes a
@@ -199,6 +224,40 @@ Hover a wire and it offers to cut itself.
 Both go through app-only tools, so rewiring a board never wakes the model or
 costs a turn — the same trick that makes dragging a chip free.
 
+## Armed is a claim Circuit can check
+
+Circuit has no scheduler. An armed workflow depends on someone creating a
+scheduled task that calls it, and the failure is silent: the board says "armed"
+for three weeks while nothing has called it once.
+
+So `circuit_arm` hands over the exact prompt to schedule, and asks for the task
+id back:
+
+```
+Friday digest is armed on `0 22 * * 5` (about every 7 days).
+
+Circuit has no scheduler of its own, so nothing will call this until you create a
+scheduled task. Create one on that cron with exactly this prompt:
+
+Run Circuit workflow wf_cbb0b7fe ("Friday digest"): call circuit_run with
+workflowId "wf_cbb0b7fe", then follow each directive it returns until you get
+{"act":"done"}.
+```
+
+`circuit_health` then checks the claim against reality — whether a task was ever
+recorded, and whether the thing has run recently enough for its own schedule:
+
+```
+✕ wf_cbb0b7fe  Friday digest
+    armed on "Fridays at 5pm" but no scheduled task was ever reported back.
+    Create one and record it with circuit_scheduled, or nothing will ever call this.
+```
+
+Overdue is judged at **two windows late**, measured against the *widest* gap in
+the schedule rather than the average. A weekdays-at-one workflow fires 24 hours
+apart four times and then 72 over the weekend; judging it on the 24 would call
+every Sunday an outage.
+
 ## Every workflow has a second path
 
 A step fails. The connector 403s, the record isn't there, the API is having a
@@ -257,6 +316,7 @@ Twelve types. Four are settled by Circuit itself; the rest become directives.
 | **only if** | `logic.filter` | **Circuit** | Stops the path unless the conditions hold. |
 | **route** | `logic.branch` | **Circuit** | Routes on a value it already has. |
 | **for each** | `logic.each` | **Circuit** | Runs everything downstream once per item, with a hard limit. |
+| **run** | `flow.call` | **Circuit** | Runs another workflow and carries back what its `returns` names. |
 | **all of** | `logic.branches` | **Circuit** | Fans out to several branches and continues at `join` once every one has finished. Set `together` and every branch goes out in one directive, answered in a single turn. |
 | **ask you** | `gate.approve` | you | Parks the run and shows you an editable preview on the board. |
 | **report** | `note.say` | Claude | Reports back in the conversation. |
@@ -323,7 +383,9 @@ Thirteen tools, one capability each. Three are invisible to the model.
 | `circuit_runs` | model + app | History. |
 | `circuit_export` | model | Writes the workflow out as a page to publish as an artifact. |
 | `circuit_import` | model + app | Rebuilds a saved workflow from that page, or from JSON. |
-| `circuit_arm` · `circuit_disarm` | model + app | Marks a workflow live, and tells Claude how to schedule it. |
+| `circuit_arm` · `circuit_disarm` | model + app | Marks a workflow live, and hands over the exact prompt to schedule. |
+| `circuit_scheduled` | model + app | Records the scheduled task that calls an armed workflow. |
+| `circuit_health` | model | Which armed workflows have quietly stopped firing. |
 | `circuit_answer` | app + model | Approve or reject a held gate, with edits. |
 | `circuit_move` | **app only** | Persists a drag. Invisible to the model, so a nudge never costs a turn. |
 | `circuit_wire` · `circuit_unwire` | app + model | Connect and cut, from the canvas or from chat. |
@@ -458,7 +520,8 @@ There is deliberately no third row. Circuit stores workflows and run history; it
 - [x] Fan-out with a join, and `together` for several calls in one turn
 - [x] Workflow inputs
 - [x] Save a workflow as an artifact you keep, and restore it anywhere
-- [ ] Sub-workflows — one board calling another
+- [x] Sub-workflows — one board calling another
+- [x] Scheduling that closes the loop, and a health check for silently dead workflows
 - [ ] Multi-user hosting and per-step failure rates
 
 The reasoning behind the order, and what Circuit deliberately will not do, is in

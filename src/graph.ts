@@ -52,6 +52,16 @@ export type Workflow = {
   version: number;
   createdAt: string;
   updatedAt: string;
+  /** set when the workflow is armed on a schedule someone has to actually create */
+  schedule?: {
+    cron: string;
+    note?: string;
+    /** the scheduled task reported back by circuit_scheduled */
+    taskId?: string;
+    confirmedAt?: string;
+  };
+  /** when a run last started, so a silently dead schedule is visible */
+  lastRunAt?: string;
 };
 
 export type StepRunState =
@@ -78,6 +88,26 @@ export type LoopFrame = {
   stepId: string; items: any[]; index: number; limit: number;
   /** each: the shared body. branches: one entry point per item. */
   body: string[]; after: string[];
+};
+
+/**
+ * One suspended `flow.call`. Everything the parent needs to carry on is held
+ * here while the sub-workflow runs in the same Run — its own queue, its own
+ * loops, and its own `steps` namespace, so a sub-workflow's step ids can never
+ * collide with its caller's.
+ */
+export type CallFrame = {
+  stepId: string;
+  parentFlowId: string;
+  childFlowId: string;
+  queue: string[];
+  loops: LoopFrame[];
+  steps: Record<string, any>;
+  input: Record<string, any>;
+  trigger: any;
+  item?: any;
+  returns?: string;
+  depth: number;
 };
 
 /** One thing that happened, in order. The timeline a replay scrubs through. */
@@ -108,6 +138,10 @@ export type Run = {
   /** depth-first list of steps still to visit */
   queue: string[];
   loops: LoopFrame[];
+  /** which workflow the queue currently refers to; unset means the root */
+  flowId?: string;
+  /** suspended callers, innermost last */
+  calls?: CallFrame[];
   /** the step Claude is currently working on, if any */
   awaiting: { stepId: string; act: string; batch?: string[] } | null;
   /** how many times each step has been handed out, for retry limits */

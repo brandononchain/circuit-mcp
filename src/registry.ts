@@ -260,6 +260,25 @@ export const STEPS: StepDef[] = [
     summary: (c) => c.question || "nothing moves until you say so",
   },
   {
+    type: "flow.call", kind: "logic", label: "run", actor: "circuit",
+    title: "Run another workflow",
+    blurb:
+      "Runs a whole other board from here and carries its result back. The sub-workflow gets its own " +
+      "step namespace, so ids cannot collide, and only what `returns` names comes back. Use it to keep " +
+      "a long workflow readable, or to reuse a piece you have already got right.",
+    ports: ["out"],
+    config: z.object({
+      workflowId: z.string().describe("id of the workflow to run. It must already exist here."),
+      input: z.record(z.any()).default({}).describe(
+        "Values for that workflow's declared inputs. Templates resolve first, so {{item.email}} works."),
+      trigger: z.record(z.any()).default({}).describe("What the sub-workflow should see as its trigger."),
+      returns: z.string().default("").describe(
+        "Dot path inside the sub-run to hand back, e.g. 'steps.draft.text'. Leave empty to get all of " +
+        "its steps as an object."),
+    }),
+    summary: (c) => c.workflowId ? `${c.workflowId}${c.returns ? ` → ${c.returns}` : ""}` : "nothing chosen yet",
+  },
+  {
     type: "note.say", kind: "note", label: "report", actor: "claude",
     title: "Tell me what happened",
     blurb: "You report back in the conversation. Good as the last step of a run.",

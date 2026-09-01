@@ -308,5 +308,92 @@ const badTogether = await client.callTool({ name: "circuit_design", arguments: {
 } });
 console.log("together guard:", badTogether.isError, "|", badTogether.content[0].text.split("\n")[1]?.trim());
 
+/* ---- sub-workflows ---- */
+console.log("\n--- sub-workflows ---");
+const child = await client.callTool({ name: "circuit_design", arguments: {
+  name: "Draft and approve", description: "Writes a reply and holds it.",
+  inputs: [{ name: "who", description: "who it is going to", required: true }],
+  steps: [
+    { id: "start", type: "trigger.ask", title: "When called", config: {}, next: [{ port: "out", to: "write" }] },
+    { id: "write", type: "model.write", title: "Write it",
+      config: { instructions: "Reply to {{input.who}}.", maxWords: 80 }, next: [{ port: "out", to: "check" }] },
+    { id: "check", type: "gate.approve", title: "Approve it",
+      config: { preview: "steps.write.text", question: "Send this?" }, next: [] },
+  ],
+} });
+const childId = child.structuredContent.workflow.id;
+
+const parent = await client.callTool({ name: "circuit_design", arguments: {
+  name: "Chase then send", description: "Finds a thread, uses the drafting workflow, sends it.",
+  steps: [
+    { id: "go", type: "trigger.ask", title: "When I ask", config: {}, next: [{ port: "out", to: "find" }] },
+    { id: "find", type: "tool.call", title: "Find the thread",
+      config: { tool: "Gmail:search_threads", arguments: {} }, next: [{ port: "out", to: "sub" }] },
+    { id: "sub", type: "flow.call", title: "Draft and approve",
+      config: { workflowId: childId, input: { who: "{{steps.find.threads.0.from}}" }, returns: "steps.write.text" },
+      next: [{ port: "out", to: "send" }] },
+    { id: "send", type: "tool.call", title: "Send it",
+      config: { tool: "Gmail:reply", arguments: { body: "{{steps.sub}}" } }, next: [] },
+  ],
+} });
+const parentId = parent.structuredContent.workflow.id;
+console.log("chip says:", parent.structuredContent.workflow.steps.find(s => s.id === "sub").summary);
+
+let pr = await client.callTool({ name: "circuit_run", arguments: { workflowId: parentId } });
+const prid = pr.structuredContent.run.id;
+let pd = pr.structuredContent.directive, seen = [];
+let pg = 0;
+while (pd && pd.act !== "done" && pd.act !== "blocked" && pg++ < 14) {
+  seen.push(`${pd.stepId}:${pd.act}`);
+  const result = pd.act === "think" ? { text: "Hi — here is the update." }
+    : pd.act === "ask" ? { decision: "approve" }
+    : { threads: [{ id: "t1", from: "dana@northbeam.co" }] };
+  pr = await client.callTool({ name: "circuit_step", arguments: { runId: prid, stepId: pd.stepId, result } });
+  pd = pr.structuredContent.directive;
+}
+console.log("path:", seen.join(" → "), "|", JSON.stringify(pd));
+const sendStep = pr.structuredContent.run.history.find(m => m.stepId === "send");
+console.log("sub result reached the parent:", JSON.stringify(sendStep?.input));
+console.log("namespaces stayed separate:", !pr.structuredContent.run.trace.some(t => t.stepId === "write" && t.state === "idle"));
+
+const loop = await client.callTool({ name: "circuit_design", arguments: {
+  workflowId: childId, name: "Draft and approve",
+  inputs: [{ name: "who", description: "who", required: true }],
+  steps: [
+    { id: "start", type: "trigger.ask", title: "When called", config: {}, next: [{ port: "out", to: "back" }] },
+    { id: "back", type: "flow.call", title: "Call the parent", config: { workflowId: parentId }, next: [] },
+  ],
+} });
+console.log("cycle guard:", loop.isError, "|", loop.content[0].text.split("\n")[1]?.trim());
+
+/* ---- scheduling that closes the loop ---- */
+console.log("\n--- scheduling ---");
+const sched = await client.callTool({ name: "circuit_design", arguments: {
+  name: "Friday digest",
+  steps: [
+    { id: "fri", type: "trigger.schedule", title: "Every Friday", config: { cron: "0 22 * * 5", note: "Fridays at 5pm" },
+      next: [{ port: "out", to: "tell" }] },
+    { id: "tell", type: "note.say", title: "Say the digest", config: { template: "Here it is." }, next: [] },
+  ],
+} });
+const schedId = sched.structuredContent.workflow.id;
+const armedNow = await client.callTool({ name: "circuit_arm", arguments: { workflowId: schedId } });
+console.log(armedNow.content[0].text.split("\n").filter(Boolean).slice(0, 4).join("\n"));
+const only = (t) => t.split("\n").filter(l => l.includes(schedId) || l.trim().startsWith("armed") || l.trim().startsWith("task") || l.trim().startsWith("every")).join("\n");
+let h = await client.callTool({ name: "circuit_health", arguments: {} });
+console.log("\nbefore any task is recorded:\n" + only(h.content[0].text));
+await client.callTool({ name: "circuit_scheduled", arguments: { workflowId: schedId, taskId: "trig_abc123" } });
+h = await client.callTool({ name: "circuit_health", arguments: {} });
+console.log("\nafter recording the task:\n" + only(h.content[0].text));
+let sr = await client.callTool({ name: "circuit_run", arguments: { workflowId: schedId } });
+await client.callTool({ name: "circuit_step", arguments: { runId: sr.structuredContent.run.id, stepId: "tell", result: {} } });
+h = await client.callTool({ name: "circuit_health", arguments: {} });
+console.log("\nafter it actually runs:\n" + only(h.content[0].text));
+const badCron = await client.callTool({ name: "circuit_design", arguments: {
+  name: "Bad cron", steps: [
+    { id: "f", type: "trigger.schedule", title: "when", config: { cron: "not a cron" }, next: [] }] } });
+const badArm = await client.callTool({ name: "circuit_arm", arguments: { workflowId: badCron.structuredContent.workflow.id } });
+console.log("\ncron guard:", badArm.isError, "|", badArm.content[0].text);
+
 await client.close();
 console.log("\nSMOKE OK");

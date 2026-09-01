@@ -23,6 +23,8 @@ type Board = {
   workflow: {
     id: string; name: string; description: string; status: string; entry: string;
     steps: Chip[]; inputs?: { name: string; description?: string; required?: boolean }[];
+    schedule?: { cron: string; note?: string; taskId?: string } | null;
+    lastRunAt?: string | null;
   };
   run: {
     id: string; status: string; mode: string; trace: Trace[];
@@ -120,13 +122,23 @@ app.h.ontoolresult = (p: any) => {
     } else if (tools && !tools.bound && tools.present.length) {
       consoleState = { label: wf.name, sub: "connectors unchecked", busy: false };
       logLines = ["needs these connector tools:", ...tools.present.map((t) => `  ${t}`)];
+    } else if (wf.status === "armed" && wf.schedule && !wf.schedule.taskId) {
+      // armed on a schedule with nothing actually calling it is the quiet failure
+      consoleState = { label: "not scheduled yet", sub: "nothing will call this", busy: false };
+      logLines = [
+        `armed on    ${wf.schedule.cron}${wf.schedule.note ? `  (${wf.schedule.note})` : ""}`,
+        `but         no scheduled task has been recorded`,
+        `so          it will not fire until one is created`,
+      ];
     } else {
       const needs = tools?.present ?? [];
       const asks = (wf.inputs ?? []).map((i) => i.name);
       logLines = [
+        ...(wf.schedule?.taskId ? [`runs on     ${wf.schedule.cron}  via ${wf.schedule.taskId}`] : []),
         ...(needs.length ? [`connectors  ${needs.join(", ")}`] : []),
         ...(asks.length ? [`asks for    ${asks.join(", ")}`] : []),
         `steps       ${wf.steps.length}, starting at ${wf.entry}`,
+        ...(wf.lastRunAt ? [`last ran    ${wf.lastRunAt.replace("T", " ").slice(0, 16)}`] : []),
       ];
       consoleState = {
         label: wf.name,

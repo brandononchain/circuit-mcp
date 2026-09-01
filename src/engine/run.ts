@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import type { HistoryEntry, Run, Step, StepTrace, Workflow } from "../graph.js";
+import type { CallFrame, HistoryEntry, Run, Step, StepTrace, Workflow } from "../graph.js";
 import { clip } from "../clip.js";
 import { BY_TYPE, matches, pick, resolve } from "../registry.js";
 import { stepWrites } from "../tools.js";
@@ -41,11 +41,26 @@ export function newRun(
     attempts: {},
     failedAt: null,
     history: [],
+    flowId: wf.id,
+    calls: [],
     trace: wf.steps.map((s) => ({ stepId: s.id, state: "idle" as const })),
   };
 }
 
 const HISTORY_CAP = 240;
+const MAX_DEPTH = 4;
+
+/**
+ * Which workflow the queue currently refers to. A run can be part way through a
+ * sub-workflow, and every lookup — steps, ports, wires — has to happen against
+ * that one rather than against the board the run started on.
+ */
+export type Flows = Map<string, Workflow>;
+
+function active(root: Workflow, run: Run, flows?: Flows): Workflow {
+  if (!run.flowId || run.flowId === root.id) return root;
+  return flows?.get(run.flowId) ?? root;
+}
 
 /** Append to the timeline. Bounded, oldest dropped, with a marker left behind. */
 function record(run: Run, e: Omit<HistoryEntry, "at">) {
@@ -78,11 +93,36 @@ function follow(step: Step, port: string): string[] {
 }
 
 /** Walk until Claude is needed, or the run ends. */
-export function advance(wf: Workflow, run: Run): Directive {
-  const byId = new Map(wf.steps.map((s) => [s.id, s]));
+export function advance(wf: Workflow, run: Run, flows?: Flows): Directive {
   let guard = 0;
 
-  while (guard++ < 2000) {
+  while (guard++ < 4000) {
+    const cur = active(wf, run, flows);
+    const byId = new Map(cur.steps.map((s) => [s.id, s]));
+
+    if (run.queue.length === 0) {
+      // a finished sub-workflow hands its result back and the caller resumes
+      const call = run.calls?.[run.calls.length - 1];
+      if (call && !run.loops.length) {
+        const produced = call.returns ? pick(run.data, call.returns) : run.data.steps;
+        run.calls!.pop();
+        run.flowId = call.parentFlowId;
+        run.queue = [...call.queue];
+        run.loops = call.loops;
+        run.data.steps = call.steps;
+        run.data.input = call.input;
+        run.data.trigger = call.trigger;
+        if (call.item === undefined) delete run.data.item; else run.data.item = call.item;
+        run.data.steps[call.stepId] = produced ?? null;
+        const summary = `${call.childFlowId} finished`;
+        mark(run, call.stepId, { state: "done", port: "out", summary });
+        record(run, { stepId: call.stepId, state: "done", port: "out", summary, output: clip(produced) });
+        const parent = active(wf, run, flows).steps.find((s) => s.id === call.stepId);
+        if (parent) run.queue.unshift(...follow(parent, "out"));
+        continue;
+      }
+    }
+
     if (run.queue.length === 0) {
       const frame = run.loops[run.loops.length - 1];
       if (frame) {
@@ -178,6 +218,50 @@ export function advance(wf: Workflow, run: Run): Directive {
         run.queue.unshift(...follow(step, port));
         continue;
       }
+      if (step.type === "flow.call") {
+        const child = flows?.get(String(cfg.workflowId ?? ""));
+        if (!child) return blocked(run, id, `Step '${id}' calls workflow '${cfg.workflowId}', which is not here.`);
+        const depth = (run.calls?.length ?? 0) + 1;
+        if (depth > MAX_DEPTH) return blocked(run, id, `Workflows are nested more than ${MAX_DEPTH} deep at '${id}'.`);
+
+        const missing = (child.inputs ?? [])
+          .filter((d) => d.required !== false && (cfg.input ?? {})[d.name] === undefined && d.default === undefined)
+          .map((d) => d.name);
+        if (missing.length) {
+          return blocked(run, id, `'${child.name}' needs ${missing.join(", ")}, and '${id}' does not pass ${missing.length === 1 ? "it" : "them"}.`);
+        }
+
+        const childInput: Record<string, any> = { ...(cfg.input ?? {}) };
+        for (const d of child.inputs ?? []) {
+          if (childInput[d.name] === undefined && d.default !== undefined) childInput[d.name] = d.default;
+        }
+
+        const frame: CallFrame = {
+          stepId: id,
+          parentFlowId: run.flowId ?? wf.id,
+          childFlowId: child.id,
+          queue: [...run.queue],
+          loops: run.loops,
+          steps: run.data.steps,
+          input: run.data.input ?? {},
+          trigger: run.data.trigger,
+          item: run.data.item,
+          returns: cfg.returns || undefined,
+          depth,
+        };
+        run.calls = [...(run.calls ?? []), frame];
+        run.flowId = child.id;
+        run.queue = [child.entry];
+        run.loops = [];
+        run.data.steps = {};
+        run.data.input = childInput;
+        run.data.trigger = cfg.trigger ?? {};
+        delete run.data.item;
+        mark(run, id, { state: "running", summary: `running ${child.name}` });
+        record(run, { stepId: id, state: "running", summary: `into ${child.name}`, input: clip(childInput) });
+        continue;
+      }
+
       if (step.type === "logic.branches") {
         const branches = follow(step, "out");
 
@@ -346,8 +430,8 @@ function blocked(run: Run, stepId: string, reason: string): Directive {
  * run, end just this path, hand Claude the same directive again, or leave by the
  * error port so the board can show a fallback.
  */
-export function fail(wf: Workflow, run: Run, stepId: string, error: string): Directive {
-  const step = wf.steps.find((s) => s.id === stepId);
+export function fail(wf: Workflow, run: Run, stepId: string, error: string, flows?: Flows): Directive {
+  const step = active(wf, run, flows).steps.find((s) => s.id === stepId);
   if (!step) return { act: "blocked", stepId, reason: `No step '${stepId}' in this workflow.` };
   if (run.awaiting?.stepId !== stepId) {
     return { act: "blocked", stepId, reason: `This run is waiting on '${run.awaiting?.stepId ?? "nothing"}', not '${stepId}'.` };
@@ -365,7 +449,7 @@ export function fail(wf: Workflow, run: Run, stepId: string, error: string): Dir
       summary: `try ${tries + 1} of ${policy.attempts ?? 2}` });
     record(run, { stepId, state: "retrying", error: msg, summary: `try ${tries} failed`, item: clip(run.data.item) });
     run.queue.unshift(stepId);       // hand out the very same directive again
-    return advance(wf, run);
+    return advance(wf, run, flows);
   }
 
   if (policy.do === "route") {
@@ -376,7 +460,7 @@ export function fail(wf: Workflow, run: Run, stepId: string, error: string): Dir
       mark(run, stepId, { state: "failed", error: msg, port, attempts: tries, summary: `failed \u2192 ${port}` });
       run.data.steps[stepId] = { error: msg };
       run.queue.unshift(...wired);
-      return advance(wf, run);
+      return advance(wf, run, flows);
     }
     // nothing wired to the error port — falling through to stop is safer than
     // pretending the failure was handled
@@ -387,7 +471,7 @@ export function fail(wf: Workflow, run: Run, stepId: string, error: string): Dir
     mark(run, stepId, { state: "failed", error: msg, attempts: tries, summary: "failed, path dropped" });
     record(run, { stepId, state: "failed", error: msg, summary: "failed, path dropped", item: clip(run.data.item) });
     run.data.steps[stepId] = { error: msg };
-    return advance(wf, run);         // the loop, if any, moves to the next item
+    return advance(wf, run, flows);         // the loop, if any, moves to the next item
   }
 
   mark(run, stepId, { state: "failed", error: msg, attempts: tries });
@@ -403,10 +487,10 @@ export function fail(wf: Workflow, run: Run, stepId: string, error: string): Dir
 }
 
 /** Pick a failed run back up, either retrying the step or stepping over it. */
-export function resume(wf: Workflow, run: Run, skip = false): Directive {
+export function resume(wf: Workflow, run: Run, skip = false, flows?: Flows): Directive {
   const stepId = run.failedAt;
   if (!stepId) return { act: "blocked", stepId: "?", reason: `Run ${run.id} is ${run.status} and has nothing to pick up.` };
-  const step = wf.steps.find((s) => s.id === stepId);
+  const step = active(wf, run, flows).steps.find((s) => s.id === stepId);
   if (!step) return { act: "blocked", stepId, reason: `Step '${stepId}' is no longer in this workflow.` };
 
   run.status = "running";
@@ -421,7 +505,7 @@ export function resume(wf: Workflow, run: Run, skip = false): Directive {
     mark(run, stepId, { state: "idle", error: undefined, summary: undefined });
     run.queue.unshift(stepId);
   }
-  return advance(wf, run);
+  return advance(wf, run, flows);
 }
 
 /**
@@ -431,9 +515,10 @@ export function resume(wf: Workflow, run: Run, skip = false): Directive {
  */
 export function reportMany(
   wf: Workflow, run: Run, stepId: string,
-  results: Record<string, any> = {}, errors: Record<string, string> = {},
+  results: Record<string, any> = {}, errors: Record<string, string> = {}, flows?: Flows,
 ): Directive {
-  const step = wf.steps.find((s) => s.id === stepId);
+  const cur = active(wf, run, flows);
+  const step = cur.steps.find((s) => s.id === stepId);
   if (!step) return { act: "blocked", stepId, reason: `No step '${stepId}' in this workflow.` };
   if (run.awaiting?.stepId !== stepId || !run.awaiting.batch) {
     return { act: "blocked", stepId, reason: `This run is not waiting on a batch at '${stepId}'.` };
@@ -444,7 +529,7 @@ export function reportMany(
 
   let stopped: { id: string; msg: string } | null = null;
   for (const id of batch) {
-    const child = wf.steps.find((s) => s.id === id)!;
+    const child = cur.steps.find((s) => s.id === id)!;
     const err = errors[id];
     if (err) {
       const msg = String(err).slice(0, 400);
@@ -477,12 +562,12 @@ export function reportMany(
   mark(run, stepId, { state: "done", port: "join", summary: `${batch.length} done` });
   record(run, { stepId, state: "done", port: "join", summary: `${batch.length} done at once` });
   run.queue.unshift(...follow(step, "join"));
-  return advance(wf, run);
+  return advance(wf, run, flows);
 }
 
 /** Claude reports what happened; the walk continues. */
-export function report(wf: Workflow, run: Run, stepId: string, result: any): Directive {
-  const step = wf.steps.find((s) => s.id === stepId);
+export function report(wf: Workflow, run: Run, stepId: string, result: any, flows?: Flows): Directive {
+  const step = active(wf, run, flows).steps.find((s) => s.id === stepId);
   if (!step) return { act: "blocked", stepId, reason: `No step '${stepId}' in this workflow.` };
   if (run.awaiting?.stepId !== stepId) {
     return { act: "blocked", stepId, reason: `This run is waiting on '${run.awaiting?.stepId ?? "nothing"}', not '${stepId}'.` };
@@ -504,7 +589,7 @@ export function report(wf: Workflow, run: Run, stepId: string, result: any): Dir
       input: clip(given.arguments ?? {}), output: "(not called — rehearsal)", item: clip(run.data.item),
     });
     run.queue.unshift(...follow(step, "out"));
-    return advance(wf, run);
+    return advance(wf, run, flows);
   }
 
   if (step.type === "model.classify") {
@@ -542,7 +627,7 @@ export function report(wf: Workflow, run: Run, stepId: string, result: any): Dir
     item: clip(run.data.item),
   });
   run.queue.unshift(...follow(step, port));
-  return advance(wf, run);
+  return advance(wf, run, flows);
 }
 
 /** A person reads this on the chip, so count things rather than naming keys. */

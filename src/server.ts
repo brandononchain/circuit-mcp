@@ -7,9 +7,10 @@ import { InputSchema, StepSchema, findEntry, layout, type Run, type Workflow } f
 import { BY_TYPE, catalog } from "./registry.js";
 import { describe, toBoard } from "./board.js";
 import { getStore } from "./store/index.js";
-import { advance, fail, newRun, report, reportMany, resume, type Directive } from "./engine/run.js";
-import { checkTogether, checkTools, describeMissing, requiredTools, stepWrites, unguardedWrites, type ToolBinding } from "./tools.js";
+import { advance, fail, newRun, report, reportMany, resume, type Directive, type Flows } from "./engine/run.js";
+import { calledFlows, checkFlows, checkTogether, checkTools, describeMissing, requiredTools, stepWrites, unguardedWrites, type ToolBinding } from "./tools.js";
 import { exportHtml, parseExport } from "./export.js";
+import { describeMinutes, health, intervalMinutes, isValidCron } from "./schedule.js";
 
 export const APP_URI = "ui://circuit/board.html";
 export const APP_MIME = "text/html;profile=mcp-app";
@@ -51,7 +52,7 @@ before a directive reaches you — never fill them in yourself.`;
 export function buildServer(workspace: string): McpServer {
   const store = getStore();
   const server = new McpServer(
-    { name: "circuit", version: "0.6.0", title: "Circuit" },
+    { name: "circuit", version: "0.7.0", title: "Circuit" },
     { instructions: INSTRUCTIONS },
   );
 
@@ -77,6 +78,21 @@ export function buildServer(workspace: string): McpServer {
   });
 
   const load = async (id: string) => store.getWorkflow(workspace, id);
+
+  /** Every workflow a run might step into, loaded up front so the engine can switch synchronously. */
+  async function flowsFor(wf: Workflow): Promise<Flows> {
+    const map: Flows = new Map([[wf.id, wf]]);
+    const queue = calledFlows(wf);
+    while (queue.length) {
+      const id = queue.shift()!;
+      if (map.has(id)) continue;
+      const child = await load(id);
+      if (!child) continue;
+      map.set(id, child);
+      queue.push(...calledFlows(child));
+    }
+    return map;
+  }
 
   /* ---------------------------------------------------------------- read -- */
 
@@ -191,6 +207,11 @@ export function buildServer(workspace: string): McpServer {
       createdAt: existing?.createdAt ?? now(),
       updatedAt: now(),
     };
+    const known = await flowsFor(wf);
+    const nested = checkFlows(wf, (id) => known.get(id));
+    if (nested.length) {
+      return oops(`This will not run as a set of workflows:\n${nested.map((n) => `  ${n}`).join("\n")}`);
+    }
     const together = checkTogether(wf);
     if (together.length) {
       return oops(`'together' is only for branches that are a single connector call:\n${together.map((t) => `  ${t}`).join("\n")}`);
@@ -406,7 +427,10 @@ export function buildServer(workspace: string): McpServer {
     }
 
     const run = newRun(wf, trigger ?? {}, mode, supplied);
-    const d = advance(wf, run);
+    const flows = await flowsFor(wf);
+    const d = advance(wf, run, flows);
+    wf.lastRunAt = now();
+    await store.putWorkflow(wf);
     await store.putRun(run);
     const unchecked = !check.bound && check.present.length
       ? `\n\nNo tool list on file, so Circuit could not check the ${check.present.length} connector ` +
@@ -445,10 +469,11 @@ export function buildServer(workspace: string): McpServer {
     if (!run) return oops(`No run ${runId}.`);
     const wf = await load(run.workflowId);
     if (!wf) return oops(`Workflow ${run.workflowId} is gone.`);
+    const flows = await flowsFor(wf);
     const batched = run.awaiting?.batch && (results || errors);
-    const d = batched ? reportMany(wf, run, stepId, results ?? {}, errors ?? {})
-      : error ? fail(wf, run, stepId, error)
-      : report(wf, run, stepId, result ?? {});
+    const d = batched ? reportMany(wf, run, stepId, results ?? {}, errors ?? {}, flows)
+      : error ? fail(wf, run, stepId, error, flows)
+      : report(wf, run, stepId, result ?? {}, flows);
     await store.putRun(run);
     return withDirective(wf, run, d);
   });
@@ -471,7 +496,7 @@ export function buildServer(workspace: string): McpServer {
     if (!run.failedAt) return oops(`Run ${runId} is ${run.status} — there is nothing to pick up.`);
     const wf = await load(run.workflowId);
     if (!wf) return oops(`Workflow ${run.workflowId} is gone.`);
-    const d = resume(wf, run, skip);
+    const d = resume(wf, run, skip, await flowsFor(wf));
     await store.putRun(run);
     return withDirective(wf, run, d);
   });
@@ -521,14 +546,35 @@ export function buildServer(workspace: string): McpServer {
         `explicitly wants it to fire unattended — call circuit_arm again with force.`,
       );
     }
-    wf.status = "armed"; wf.updatedAt = now();
-    await store.putWorkflow(wf);
     const cron = trig?.type === "trigger.schedule" ? String(trig.config?.cron ?? "") : "";
+    if (cron && !isValidCron(cron)) {
+      return oops(`'${cron}' is not a 5 field cron expression, so nothing could ever be scheduled from it.`);
+    }
+    wf.status = "armed";
+    wf.updatedAt = now();
+    if (cron) {
+      wf.schedule = { cron, note: String(trig?.config?.note ?? ""), taskId: wf.schedule?.taskId, confirmedAt: wf.schedule?.confirmedAt };
+    }
+    await store.putWorkflow(wf);
+
+    if (!cron) {
+      return ok(
+        `${wf.name} is armed. Its trigger is "${trig?.type ?? "?"}", so it runs when you call circuit_run.`,
+        toBoard(wf, null, { phase: "design" }),
+      );
+    }
+    const every = intervalMinutes(cron);
+    const prompt =
+      `Run Circuit workflow ${wf.id} ("${wf.name}"): call circuit_run with workflowId "${wf.id}"` +
+      ((wf.inputs ?? []).length ? `, passing input for ${(wf.inputs ?? []).map((i) => i.name).join(" and ")}` : "") +
+      `, then follow each directive it returns until you get {"act":"done"}.`;
     return ok(
-      `${wf.name} is armed.` + (cron
-        ? ` Now create a scheduled task on '${cron}' whose prompt is: "Run Circuit workflow ${wf.id} with circuit_run, then follow its directives."`
-        : ` Its trigger is "${trig?.type ?? "?"}", so it runs when you call circuit_run.`),
-      toBoard(wf, null, { phase: "design" }),
+      `${wf.name} is armed on \`${cron}\`${every ? ` (about every ${describeMinutes(every)})` : ""}.\n\n` +
+      `Circuit has no scheduler of its own, so nothing will call this until you create a scheduled task. ` +
+      `Create one on that cron with exactly this prompt:\n\n${prompt}\n\n` +
+      `Then call circuit_scheduled with the task's id, so Circuit can tell later whether it is still ` +
+      `firing. Until you do, circuit_health will report this workflow as armed but unconfirmed.`,
+      toBoard(wf, null, { phase: "design", schedulePrompt: prompt }),
     );
   });
 
@@ -543,6 +589,55 @@ export function buildServer(workspace: string): McpServer {
     wf.status = "draft"; wf.updatedAt = now();
     await store.putWorkflow(wf);
     return ok(`${wf.name} is back to draft.`, toBoard(wf, null, { phase: "design" }));
+  });
+
+  server.registerTool("circuit_scheduled", {
+    title: "Record the scheduled task",
+    description:
+      "After you create the scheduled task that calls an armed workflow, tell Circuit its id. That is " +
+      "the only way Circuit can later distinguish 'armed and firing' from 'armed and quietly dead'.",
+    inputSchema: {
+      workflowId: z.string(),
+      taskId: z.string().describe("Whatever identifies the scheduled task you just made."),
+    },
+    _meta: ui(),
+  }, async ({ workflowId, taskId }) => {
+    const wf = await load(workflowId);
+    if (!wf) return oops(`No workflow ${workflowId}.`);
+    if (!wf.schedule?.cron) {
+      return oops(`${wf.name} has no schedule, so there is nothing for a task to be attached to. Arm it on a trigger.schedule first.`);
+    }
+    wf.schedule = { ...wf.schedule, taskId, confirmedAt: now() };
+    wf.updatedAt = now();
+    await store.putWorkflow(wf);
+    return ok(
+      `Noted — task ${taskId} calls ${wf.name} on \`${wf.schedule.cron}\`. circuit_health will tell you if it stops.`,
+      toBoard(wf, null, { phase: "design" }),
+    );
+  });
+
+  server.registerTool("circuit_health", {
+    title: "Is anything quietly dead?",
+    description:
+      "Checks every armed workflow against what is actually happening: whether a scheduled task was " +
+      "ever recorded, and whether it has run recently enough for its own schedule. Worth calling when " +
+      "the user wonders why something stopped, and worth calling unprompted if they mention that an " +
+      "automation has gone quiet.",
+    inputSchema: {},
+    annotations: { readOnlyHint: true },
+  }, async () => {
+    const all = await store.listWorkflows(workspace);
+    const armed = all.filter((w) => w.status === "armed");
+    if (!armed.length) return say("Nothing is armed, so nothing is meant to be running on its own.");
+    const rows = armed.map((w) => health(w));
+    const bad = rows.filter((r) => r.state !== "fine");
+    const lines = rows.map((r) => `${r.state === "fine" ? "  ok" : "  ✕ "} ${r.workflowId}  ${r.name}\n       ${r.detail}`);
+    return say(
+      (bad.length
+        ? `${bad.length} of ${rows.length} armed workflow${rows.length === 1 ? "" : "s"} ${bad.length === 1 ? "needs" : "need"} attention.\n\n`
+        : `All ${rows.length} armed workflow${rows.length === 1 ? " is" : "s are"} firing as expected.\n\n`) +
+      lines.join("\n"),
+    );
   });
 
   /* ----------------------------------------------- edits made on the board -- */
@@ -646,7 +741,7 @@ export function buildServer(workspace: string): McpServer {
     if (!run.awaiting) return oops(`Run ${runId} is ${run.status} — it is not waiting on anything.`);
     const wf = await load(run.workflowId);
     if (!wf) return oops(`Workflow ${run.workflowId} is gone.`);
-    const d = report(wf, run, run.awaiting.stepId, { decision, edit });
+    const d = report(wf, run, run.awaiting.stepId, { decision, edit }, await flowsFor(wf));
     await store.putRun(run);
     return withDirective(wf, run, d);
   });

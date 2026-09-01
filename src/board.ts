@@ -16,6 +16,8 @@ export function toBoard(wf: Workflow, run?: Run | null, extra: Record<string, un
       status: wf.status,
       entry: wf.entry,
       inputs: wf.inputs ?? [],
+      schedule: wf.schedule ?? null,
+      lastRunAt: wf.lastRunAt ?? null,
       steps: wf.steps.map((s) => ({
         id: s.id,
         type: s.type,

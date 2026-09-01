@@ -1,6 +1,6 @@
 import type { Step, Workflow } from "./graph.js";
 import { BY_TYPE, humanTool, portsOf, summarise, toolOf } from "./registry.js";
-import { requiredTools, stepWrites } from "./tools.js";
+import { calledFlows, requiredTools, stepWrites } from "./tools.js";
 
 /**
  * A workflow, rendered as a page you can keep.
@@ -126,8 +126,12 @@ function prose(wf: Workflow): string {
 export function exportHtml(wf: Workflow): string {
   const tools = [...new Set(requiredTools(wf.steps).map((t) => t.tool))];
   const services = [...new Set(tools.map((t) => t.split(/[:.]/)[0]))];
+  const subs = calledFlows(wf);
   const json = JSON.stringify(
-    { circuit: 1, name: wf.name, description: wf.description, entry: wf.entry, inputs: wf.inputs ?? [], steps: wf.steps },
+    {
+      circuit: 1, name: wf.name, description: wf.description, entry: wf.entry,
+      inputs: wf.inputs ?? [], schedule: wf.schedule ?? undefined, steps: wf.steps,
+    },
     null, 1,
   );
 
@@ -221,6 +225,8 @@ footer{margin-top:44px;border-top:1px solid var(--rule);background:var(--panel);
     <span class="tag"><b>${wf.steps.length}</b> steps</span>
     ${services.length ? `<span class="tag">needs <b>${esc(services.join(", "))}</b></span>` : ""}
     ${(wf.inputs ?? []).length ? `<span class="tag">asks for <b>${esc((wf.inputs ?? []).map((i) => i.name).join(", "))}</b></span>` : ""}
+    ${wf.schedule?.cron ? `<span class="tag">runs <b>${esc(wf.schedule.note || wf.schedule.cron)}</b></span>` : ""}
+    ${subs.length ? `<span class="tag">calls <b>${subs.length}</b> other workflow${subs.length === 1 ? "" : "s"}</span>` : ""}
     <span class="tag">saved from Circuit</span>
   </div>
 </div></header>
@@ -245,6 +251,9 @@ footer{margin-top:44px;border-top:1px solid var(--rule);background:var(--panel);
   </table></section>` : ""}
 
   <section><h2>Put it back to work</h2>
+    ${subs.length ? `<div class="restore" style="border-color:var(--accent)"><b>This one calls other workflows.</b>
+    It names ${esc(subs.join(", "))}, which are separate boards — save and restore those too, and rewire
+    the <code>flow.call</code> steps to whatever ids they come back as.</div>` : ""}
     <div class="restore">Open any Claude conversation with the <b>Circuit</b> connector on, paste this
     page's link, and say <b>restore this workflow</b>. Claude reads the definition below and rebuilds
     the board. Nothing here is a secret — it is the shape of the automation, not an account or a key.</div>

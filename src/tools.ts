@@ -195,6 +195,53 @@ export function checkTogether(wf: Workflow): string[] {
   return problems;
 }
 
+/** Every workflow a board reaches through flow.call, itself included. */
+export function calledFlows(wf: Workflow): string[] {
+  return [...new Set(
+    wf.steps
+      .filter((s) => s.type === "flow.call")
+      .map((s) => String((s.config as any)?.workflowId ?? ""))
+      .filter(Boolean),
+  )];
+}
+
+/**
+ * A workflow that calls itself, directly or round a longer loop, would run
+ * until the depth guard stopped it. Better to refuse it while it is being drawn
+ * and say where the loop closes.
+ */
+export function checkFlows(
+  wf: Workflow, get: (id: string) => Workflow | undefined,
+): string[] {
+  const problems: string[] = [];
+  const seen = new Set<string>();
+
+  const walk = (id: string, path: string[]) => {
+    if (path.includes(id)) {
+      problems.push(`${[...path, id].join(" → ")} calls itself.`);
+      return;
+    }
+    if (seen.has(id)) return;
+    seen.add(id);
+    const w = id === wf.id ? wf : get(id);
+    if (!w) return;
+    if (path.length >= 4) {
+      problems.push(`${[...path, id].join(" → ")} nests more than 4 deep.`);
+      return;
+    }
+    for (const s of w.steps) {
+      if (s.type !== "flow.call") continue;
+      const target = String((s.config as any)?.workflowId ?? "");
+      if (!target) { problems.push(`${w.id}: step '${s.id}' does not say which workflow to run.`); continue; }
+      const child = target === wf.id ? wf : get(target);
+      if (!child) { problems.push(`${w.id}: step '${s.id}' calls '${target}', which does not exist here.`); continue; }
+      walk(target, [...path, id]);
+    }
+  };
+  walk(wf.id, []);
+  return problems;
+}
+
 /** Which connectors a board touches, for the header line on the app. */
 export function servicesOf(wf: Workflow): string[] {
   return [...new Set(requiredTools(wf.steps).map((t) => t.tool.split(/[:.]/)[0]))];
