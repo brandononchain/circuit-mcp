@@ -1,0 +1,33 @@
+{
+ "circuit": 1,
+ "name": "Weekly digest",
+ "description": "Every Friday afternoon, gathers the week from a few places at once and posts a summary.",
+ "entry": "friday",
+ "inputs": [
+  { "name": "channel", "description": "Where the digest should be posted", "required": true, "default": "#general" }
+ ],
+ "steps": [
+  { "id": "friday", "type": "trigger.schedule", "title": "Every Friday at five",
+    "config": { "cron": "0 22 * * 5", "note": "Fridays at 5pm" },
+    "next": [{ "port": "out", "to": "gather" }] },
+  { "id": "gather", "type": "logic.branches", "title": "Gather the week",
+    "config": { "together": true },
+    "next": [{ "port": "out", "to": "mail" }, { "port": "out", "to": "meetings" },
+             { "port": "join", "to": "write" }] },
+  { "id": "mail", "type": "tool.call", "title": "The week's threads",
+    "config": { "tool": "Gmail:search_threads", "arguments": { "q": "newer_than:7d" } }, "next": [] },
+  { "id": "meetings", "type": "tool.call", "title": "The week's meetings",
+    "config": { "tool": "Google_Calendar:list_events", "arguments": { "days": -7 } }, "next": [] },
+  { "id": "write", "type": "model.write", "title": "Write the digest",
+    "config": { "instructions": "Five bullets, plainest possible language. Lead with anything that needs a decision.",
+      "context": ["steps.mail", "steps.meetings"], "maxWords": 180 },
+    "next": [{ "port": "out", "to": "check" }] },
+  { "id": "check", "type": "gate.approve", "title": "Let me read it first",
+    "config": { "preview": "steps.write.text", "question": "Post this digest?" },
+    "next": [{ "port": "out", "to": "post" }] },
+  { "id": "post", "type": "tool.call", "title": "Post it to the team",
+    "config": { "tool": "Slack:send_message",
+      "arguments": { "channel": "{{input.channel}}", "text": "{{steps.write.text}}" } },
+    "next": [] }
+ ]
+}

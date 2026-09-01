@@ -20,35 +20,31 @@ Sequenced by what breaks first if you actually use it.
 | **Honest test mode** | Steps that write come back as `preview` instead of running, detected from the verb and overridable per step. `circuit_arm` refuses a write with no approval gate on every path to it. |
 | **Wire editing** | Drag from an output port to a chip to connect; hover a wire to cut it. App-only, so it never costs a turn. |
 | **Run replay** | Every run records what each step was given and what came back, clipped; the board scrubs through it. |
-| **Fan-out with a join** | `logic.branches` runs several branches and continues once all of them are done. |
+| **Fan-out with a join** | `logic.branches` runs several branches and continues once all of them are done; `together` sends them as one directive answered in a single turn. |
+| **Workflow inputs** | `{{input.…}}` declared on the workflow, asked for by `circuit_run`, so one board serves many cases. |
+| **Saved workflows** | `circuit_export` writes a standalone page to publish as an artifact; `circuit_import` reads a workflow back out of one. |
 
 ---
 
 ## Now
 
-### Concurrency, honestly
+### Sub-workflows
 
-`logic.branches` shipped as fan-out with a join, and it is deliberately
-sequential: Circuit walks one branch after another because the directive loop
-hands out one thing at a time. That is the correct shape for the graph and it is
-not what people mean by parallel.
+A `flow.call` step that runs another board and returns its result. Composition is
+what stops a large workflow becoming unreadable, and inputs — now shipped — are
+what make it possible: a sub-workflow is a board with declared inputs and a
+declared result.
 
-The real version is a directive that carries several calls at once —
-`{"act": "call_many", "calls": [...]}` — which Claude answers in a single turn,
-because a model can make three tool calls in one message. Three lookups stop
-being three round trips.
+The open question is what a failure inside a sub-workflow means to its caller.
+The honest default is that it propagates like any other step failure, and the
+caller's own `onError` decides — but that wants trying before it is settled.
 
-It is a real change to the state machine: the engine holds exactly one
-`awaiting` step today, and this means holding a set, correlating results back to
-the steps that asked for them, and deciding what a partial failure means when two
-of three calls came back. That last question is the actual design work, and it is
-why this is its own item rather than a flag on `logic.branches`.
+### Scheduling that closes the loop
 
-### Workflow inputs
-
-`{{input.customer}}` alongside `{{trigger.…}}`, declared on the workflow and
-prompted for by `circuit_run`. One board then serves many cases instead of being
-copied and edited, and a workflow becomes something you can hand to someone else.
+`circuit_arm` tells Claude to go create a scheduled task and trusts that it
+happened. It should be able to check, and to say when a workflow claims to be
+armed but nothing is actually calling it. A workflow that silently stopped firing
+three weeks ago is worse than one that never fired.
 
 ## Next
 
@@ -111,6 +107,6 @@ syntax.
 | --- | --- |
 | **0.3** | Connector binding, failure policies, resume. |
 | **0.4** | Honest test mode, wire editing. |
-| **0.5** | Run replay, fan-out with a join. *(current)* |
-| **0.6** | Real concurrency, workflow inputs, export/import, starter examples. |
+| **0.5** | Run replay, fan-out with a join. |
+| **0.6** | Concurrency, workflow inputs, saved workflows, starter examples. *(current)* |
 | **1.0** | Multi-user hosting, observability, a deployment someone else can run. |

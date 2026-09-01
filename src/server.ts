@@ -3,12 +3,13 @@ import { z } from "zod";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 
 import { BOARD_HTML } from "./app/board.generated.js";
-import { StepSchema, findEntry, layout, type Run, type Workflow } from "./graph.js";
+import { InputSchema, StepSchema, findEntry, layout, type Run, type Workflow } from "./graph.js";
 import { BY_TYPE, catalog } from "./registry.js";
 import { describe, toBoard } from "./board.js";
 import { getStore } from "./store/index.js";
-import { advance, fail, newRun, report, resume, type Directive } from "./engine/run.js";
-import { checkTools, describeMissing, requiredTools, stepWrites, unguardedWrites, type ToolBinding } from "./tools.js";
+import { advance, fail, newRun, report, reportMany, resume, type Directive } from "./engine/run.js";
+import { checkTogether, checkTools, describeMissing, requiredTools, stepWrites, unguardedWrites, type ToolBinding } from "./tools.js";
+import { exportHtml, parseExport } from "./export.js";
 
 export const APP_URI = "ui://circuit/board.html";
 export const APP_MIME = "text/html;profile=mcp-app";
@@ -50,7 +51,7 @@ before a directive reaches you — never fill them in yourself.`;
 export function buildServer(workspace: string): McpServer {
   const store = getStore();
   const server = new McpServer(
-    { name: "circuit", version: "0.5.0", title: "Circuit" },
+    { name: "circuit", version: "0.6.0", title: "Circuit" },
     { instructions: INSTRUCTIONS },
   );
 
@@ -167,9 +168,13 @@ export function buildServer(workspace: string): McpServer {
       description: z.string().default("").describe("One line: what it does and when it fires."),
       entry: z.string().optional().describe("id of the trigger step. Defaults to the first trigger."),
       steps: z.array(StepSchema).min(1).describe("Every step, trigger first, in reading order."),
+      inputs: z.array(InputSchema).default([]).describe(
+        "Values the workflow asks for each time it runs, reachable everywhere as {{input.<name>}}. " +
+        "Use these instead of baking a name, an address or a search term into a step — it is what " +
+        "makes one board serve many cases, and what makes it worth sharing."),
     },
     _meta: ui(),
-  }, async ({ workflowId, name, description, entry, steps }) => {
+  }, async ({ workflowId, name, description, entry, steps, inputs }) => {
     const unknown = steps.filter((s) => !BY_TYPE.has(s.type));
     if (unknown.length) {
       return oops(`Unknown step type(s): ${unknown.map((s) => s.type).join(", ")}. Call circuit_catalog and use a type from it.`);
@@ -180,11 +185,16 @@ export function buildServer(workspace: string): McpServer {
       id: existing?.id ?? workflowId ?? `wf_${randomUUID().slice(0, 8)}`,
       workspace, name, description: description ?? "",
       steps: layout(steps, e), entry: e,
+      inputs: inputs?.length ? inputs : existing?.inputs,
       status: existing?.status ?? "draft",
       version: (existing?.version ?? 0) + 1,
       createdAt: existing?.createdAt ?? now(),
       updatedAt: now(),
     };
+    const together = checkTogether(wf);
+    if (together.length) {
+      return oops(`'together' is only for branches that are a single connector call:\n${together.map((t) => `  ${t}`).join("\n")}`);
+    }
     await store.putWorkflow(wf);
     const binding = await store.getTools(workspace);
     const check = checkTools(wf.steps, binding);
@@ -266,6 +276,85 @@ export function buildServer(workspace: string): McpServer {
     );
   });
 
+  /* ------------------------------------------------------- keep and reuse -- */
+
+  server.registerTool("circuit_export", {
+    title: "Save a workflow the user can keep",
+    description:
+      "Returns a complete standalone HTML page for this workflow — the board drawn out, what each step " +
+      "does in plain English, the connectors it needs, and the definition itself. " +
+      "WHAT TO DO WITH IT: write the html exactly as given to a file and publish it with your Artifact " +
+      "tool. That gives the user a private page they keep across conversations and can share. " +
+      "Do not summarise, reformat or regenerate the html — it is already finished, and the definition " +
+      "inside it is what circuit_import reads back.",
+    inputSchema: { workflowId: z.string() },
+    annotations: { readOnlyHint: true },
+  }, async ({ workflowId }) => {
+    const wf = await load(workflowId);
+    if (!wf) return oops(`No workflow ${workflowId}.`);
+    const html = exportHtml(wf);
+    return {
+      content: [
+        { type: "text" as const,
+          text:
+            `Write this to "${wf.name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "")}.html" ` +
+            `and publish it with your Artifact tool, titled "${wf.name}". ` +
+            `Then give the user the link — that page is their copy of this workflow, and pasting it into ` +
+            `a future conversation with circuit_import rebuilds the board.\n\n--- begin html ---\n${html}\n--- end html ---`,
+        },
+      ],
+    };
+  });
+
+  server.registerTool("circuit_import", {
+    title: "Rebuild a saved workflow",
+    description:
+      "Takes a workflow the user saved earlier and puts it back on the board. Pass the whole page you " +
+      "read from their saved artifact — Circuit finds the definition inside it — or the JSON on its own. " +
+      "Tool names come back exactly as they were saved, so check them against your own tool list: a " +
+      "workflow built on someone else's connectors will name tools you do not have.",
+    inputSchema: {
+      source: z.string().describe("The saved page's HTML, or the workflow JSON."),
+      name: z.string().optional().describe("Rename it on the way in."),
+    },
+    _meta: ui(),
+  }, async ({ source, name }) => {
+    const parsed: any = parseExport(source);
+    if (!parsed || !Array.isArray(parsed.steps) || !parsed.steps.length) {
+      return oops(
+        "Could not find a workflow in that. Expected a page saved by circuit_export, or JSON with a " +
+        "`steps` array. If you read it from an artifact, pass the page's whole HTML.",
+      );
+    }
+    const steps = z.array(StepSchema).safeParse(parsed.steps);
+    if (!steps.success) {
+      return oops(`That definition did not validate: ${steps.error.issues.slice(0, 3).map((i) => `${i.path.join(".")} ${i.message}`).join("; ")}`);
+    }
+    const unknown = steps.data.filter((s) => !BY_TYPE.has(s.type));
+    if (unknown.length) return oops(`Saved with step types this Circuit does not know: ${unknown.map((s) => s.type).join(", ")}.`);
+
+    const e = findEntry(steps.data, parsed.entry);
+    const wf: Workflow = {
+      id: `wf_${randomUUID().slice(0, 8)}`,
+      workspace,
+      name: name ?? String(parsed.name ?? "Restored workflow"),
+      description: String(parsed.description ?? ""),
+      steps: layout(steps.data, e),
+      inputs: Array.isArray(parsed.inputs) && parsed.inputs.length ? parsed.inputs : undefined,
+      entry: e,
+      status: "draft",
+      version: 1,
+      createdAt: now(), updatedAt: now(),
+    };
+    await store.putWorkflow(wf);
+    const check = checkTools(wf.steps, await store.getTools(workspace));
+    return ok(
+      describe(wf) + "\n\nRestored as a draft." +
+      (check.missing.length ? `\n\n${describeMissing(check)}` : check.bound ? " Every connector it needs is one you have." : ""),
+      toBoard(wf, null, { phase: "design", tools: check }),
+    );
+  });
+
   /* ----------------------------------------------------------------- run -- */
 
   const withDirective = (wf: Workflow, run: Run, d: Directive) =>
@@ -286,9 +375,12 @@ export function buildServer(workspace: string): McpServer {
       mode: z.enum(["test", "live"]).default("live"),
       trigger: z.record(z.any()).optional()
         .describe("Starting payload, reachable as {{trigger.…}}. Omit for a trigger.watch workflow."),
+      input: z.record(z.any()).default({}).describe(
+        "Values for the workflow's declared inputs. Ask the user for anything you do not already know " +
+        "rather than guessing — these usually decide who gets contacted and what about."),
     },
     _meta: ui(),
-  }, async ({ workflowId, mode, trigger }) => {
+  }, async ({ workflowId, mode, trigger, input }) => {
     const wf = await load(workflowId);
     if (!wf) return oops(`No workflow ${workflowId}.`);
 
@@ -300,7 +392,20 @@ export function buildServer(workspace: string): McpServer {
         `Nothing has started. Fix the tool names with circuit_patch and call circuit_run again.`,
       );
     }
-    const run = newRun(wf, trigger ?? {}, mode);
+    const supplied: Record<string, any> = { ...input };
+    for (const decl of wf.inputs ?? []) {
+      if (supplied[decl.name] === undefined && decl.default !== undefined) supplied[decl.name] = decl.default;
+    }
+    const missing = (wf.inputs ?? []).filter((d) => d.required !== false && supplied[d.name] === undefined);
+    if (missing.length) {
+      return oops(
+        `This workflow needs ${missing.length === 1 ? "a value" : "values"} before it can run:\n` +
+        missing.map((d) => `  ${d.name} — ${d.description || "no description given"}`).join("\n") +
+        `\n\nAsk the user, then call circuit_run again with input.`,
+      );
+    }
+
+    const run = newRun(wf, trigger ?? {}, mode, supplied);
     const d = advance(wf, run);
     await store.putRun(run);
     const unchecked = !check.bound && check.present.length
@@ -316,6 +421,7 @@ export function buildServer(workspace: string): McpServer {
     title: "Report a step and get the next one",
     description:
       "Report what came back from the directive Circuit gave you, and receive the next directive. " +
+      "For a call_many directive, send `results` (and `errors`) keyed by stepId instead of `result`. " +
       "Send the tool's result verbatim for a call_tool step; {\"label\":…,\"why\":…} for a classify; " +
       "{\"text\":…} for a write; the extracted object for an extract; {\"decision\":\"approve\"|\"reject\"," +
       "\"edit\":…} for an ask; {} for a say. Keep calling until you get {\"act\":\"done\"}.",
@@ -328,14 +434,21 @@ export function buildServer(workspace: string): McpServer {
         "refused, the data was not there. Say what actually went wrong. Never paper over a failure " +
         "with a made-up result; what happens next is the step's own error policy, and Circuit needs " +
         "the truth to apply it."),
+      results: z.record(z.any()).optional().describe(
+        "Answering a call_many directive: every result, keyed by the stepId it came from."),
+      errors: z.record(z.string()).optional().describe(
+        "Answering a call_many directive: anything that failed, keyed by stepId, with what went wrong."),
     },
     _meta: ui(),
-  }, async ({ runId, stepId, result, error }) => {
+  }, async ({ runId, stepId, result, error, results, errors }) => {
     const run = await store.getRun(workspace, runId);
     if (!run) return oops(`No run ${runId}.`);
     const wf = await load(run.workflowId);
     if (!wf) return oops(`Workflow ${run.workflowId} is gone.`);
-    const d = error ? fail(wf, run, stepId, error) : report(wf, run, stepId, result ?? {});
+    const batched = run.awaiting?.batch && (results || errors);
+    const d = batched ? reportMany(wf, run, stepId, results ?? {}, errors ?? {})
+      : error ? fail(wf, run, stepId, error)
+      : report(wf, run, stepId, result ?? {});
     await store.putRun(run);
     return withDirective(wf, run, d);
   });

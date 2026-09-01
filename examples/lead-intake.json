@@ -1,0 +1,47 @@
+{
+ "circuit": 1,
+ "name": "Lead intake",
+ "description": "Turns a new form submission into a CRM record and a first reply, with the reply held for you.",
+ "entry": "form",
+ "inputs": [
+  { "name": "base", "description": "Which Airtable base the leads live in", "required": true },
+  { "name": "voice", "description": "Whose voice the first reply should sound like", "required": true }
+ ],
+ "steps": [
+  { "id": "form", "type": "trigger.ask", "title": "When a lead comes in", "config": {},
+    "next": [{ "port": "out", "to": "read" }] },
+  { "id": "read", "type": "model.extract", "title": "Pull out the details",
+    "config": { "input": "trigger", "fields": [
+      { "name": "name", "description": "Their full name" },
+      { "name": "email", "description": "Their email address" },
+      { "name": "company", "description": "Where they work, if they said" },
+      { "name": "asking_about", "description": "What they actually want, in a few words" }
+    ] },
+    "next": [{ "port": "out", "to": "size" }] },
+  { "id": "size", "type": "logic.branch", "title": "Big enough to chase?",
+    "config": { "field": "steps.read.company", "cases": [{ "equals": "", "port": "small" }], "fallback": "named" },
+    "next": [{ "port": "named", "to": "record" }, { "port": "small", "to": "record" }] },
+  { "id": "record", "type": "tool.call", "title": "Add them to the CRM",
+    "config": { "tool": "Airtable:create_records_for_table",
+      "arguments": { "baseId": "{{input.base}}", "table": "Leads",
+        "fields": { "Name": "{{steps.read.name}}", "Email": "{{steps.read.email}}",
+                    "Company": "{{steps.read.company}}", "Wants": "{{steps.read.asking_about}}" } } },
+    "onError": { "do": "route", "port": "error" },
+    "next": [{ "port": "out", "to": "reply" }, { "port": "error", "to": "flag" }] },
+  { "id": "reply", "type": "model.write", "title": "Write a first reply",
+    "config": { "instructions": "Thank them, answer what you can, and propose a next step.",
+      "voice": "{{input.voice}}", "context": ["steps.read"], "maxWords": 120 },
+    "next": [{ "port": "out", "to": "gate" }] },
+  { "id": "gate", "type": "gate.approve", "title": "Hold for my approval",
+    "config": { "preview": "steps.reply.text", "question": "Send this to the lead?" },
+    "next": [{ "port": "out", "to": "send" }] },
+  { "id": "send", "type": "tool.call", "title": "Send it",
+    "config": { "tool": "Gmail:send_message",
+      "arguments": { "to": "{{steps.read.email}}", "subject": "Thanks for getting in touch",
+                     "body": "{{steps.reply.text}}" } },
+    "next": [] },
+  { "id": "flag", "type": "note.say", "title": "Tell me the CRM refused",
+    "config": { "template": "Could not add {{steps.read.name}} to the CRM — the lead is not recorded." },
+    "next": [] }
+ ]
+}

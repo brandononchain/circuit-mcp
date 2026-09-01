@@ -17,13 +17,16 @@ const now = () => new Date().toISOString();
 export type Directive =
   | { act: "call_tool"; stepId: string; title: string; tool: string; arguments: Record<string, unknown>; expect: string }
   | { act: "preview"; stepId: string; title: string; tool: string; arguments: Record<string, unknown>; expect: string }
+  | { act: "call_many"; stepId: string; title: string; calls: { stepId: string; title: string; tool: string; arguments: Record<string, unknown> }[]; expect: string }
   | { act: "think"; stepId: string; title: string; task: "classify" | "write" | "extract"; instruction: string; input: unknown; labels?: string[]; fields?: { name: string; description: string }[]; maxWords?: number; expect: string }
   | { act: "ask"; stepId: string; title: string; question: string; preview: string; expect: string }
   | { act: "say"; stepId: string; text: string; expect: string }
   | { act: "done"; summary: string }
   | { act: "blocked"; stepId: string; reason: string };
 
-export function newRun(wf: Workflow, trigger: unknown, mode: "test" | "live"): Run {
+export function newRun(
+  wf: Workflow, trigger: unknown, mode: "test" | "live", input: Record<string, any> = {},
+): Run {
   return {
     id: `run_${randomUUID().slice(0, 8)}`,
     workflowId: wf.id,
@@ -31,7 +34,7 @@ export function newRun(wf: Workflow, trigger: unknown, mode: "test" | "live"): R
     status: "running",
     mode,
     startedAt: now(),
-    data: { trigger: trigger ?? {}, steps: {} },
+    data: { trigger: trigger ?? {}, steps: {}, input },
     queue: [wf.entry],
     loops: [],
     awaiting: null,
@@ -177,6 +180,28 @@ export function advance(wf: Workflow, run: Run): Directive {
       }
       if (step.type === "logic.branches") {
         const branches = follow(step, "out");
+
+        // all at once: one directive carrying every call, answered in one turn
+        if (cfg.together && branches.length > 1) {
+          const heads = branches.map((b) => byId.get(b)).filter(Boolean) as Step[];
+          const calls = heads.map((h) => {
+            const hc = resolve(coerce(BY_TYPE.get(h.type)!.config, h.config), run.data) as any;
+            return { stepId: h.id, title: h.title, tool: String(hc.tool ?? ""), arguments: hc.arguments ?? {} };
+          });
+          if (calls.every((c) => c.tool)) {
+            for (const h of heads) mark(run, h.id, { state: "running" });
+            mark(run, id, { state: "running", summary: `${calls.length} at once` });
+            run.awaiting = { stepId: id, act: "call_many", batch: calls.map((c) => c.stepId) };
+            return {
+              act: "call_many", stepId: id, title: step.title, calls,
+              expect:
+                "Make all of these calls in this one turn, then report them together with circuit_step: " +
+                "pass `results` as an object keyed by stepId, and put anything that failed in `errors` " +
+                "keyed the same way. Do not call them one at a time — doing them together is the point.",
+            };
+          }
+        }
+
         if (!branches.length) {
           mark(run, id, { state: "done", port: "join", summary: "nothing to do" });
           run.queue.unshift(...follow(step, "join"));
@@ -396,6 +421,62 @@ export function resume(wf: Workflow, run: Run, skip = false): Directive {
     mark(run, stepId, { state: "idle", error: undefined, summary: undefined });
     run.queue.unshift(stepId);
   }
+  return advance(wf, run);
+}
+
+/**
+ * Several calls answered in one turn. Each is marked on its own, then the run
+ * carries straight on at the join — `together` requires single-step branches
+ * precisely so there is nowhere else for it to go.
+ */
+export function reportMany(
+  wf: Workflow, run: Run, stepId: string,
+  results: Record<string, any> = {}, errors: Record<string, string> = {},
+): Directive {
+  const step = wf.steps.find((s) => s.id === stepId);
+  if (!step) return { act: "blocked", stepId, reason: `No step '${stepId}' in this workflow.` };
+  if (run.awaiting?.stepId !== stepId || !run.awaiting.batch) {
+    return { act: "blocked", stepId, reason: `This run is not waiting on a batch at '${stepId}'.` };
+  }
+  const batch = run.awaiting.batch;
+  run.awaiting = null;
+  run.status = "running";
+
+  let stopped: { id: string; msg: string } | null = null;
+  for (const id of batch) {
+    const child = wf.steps.find((s) => s.id === id)!;
+    const err = errors[id];
+    if (err) {
+      const msg = String(err).slice(0, 400);
+      const policy = child.onError?.do ?? "stop";
+      run.data.steps[id] = { error: msg };
+      mark(run, id, { state: "failed", error: msg, summary: policy === "skip" ? "failed, dropped" : "failed" });
+      record(run, { stepId: id, state: "failed", error: msg, summary: "failed in a batch" });
+      if (policy !== "skip" && !stopped) stopped = { id, msg };
+      continue;
+    }
+    const value = results[id];
+    run.data.steps[id] = value ?? {};
+    const summary = describeResult(value);
+    mark(run, id, { state: "done", port: "out", summary });
+    record(run, { stepId: id, state: "done", port: "out", summary, output: clip(value) });
+  }
+
+  if (stopped) {
+    mark(run, stepId, { state: "failed", summary: `${stopped.id} failed` });
+    run.status = "failed";
+    run.failedAt = stopped.id;
+    run.endedAt = now();
+    return {
+      act: "blocked", stepId: stopped.id,
+      reason: `${stopped.id} failed: ${stopped.msg}. The others in the batch finished. ` +
+        `Fix the cause and call circuit_resume, or circuit_resume with skip.`,
+    };
+  }
+
+  mark(run, stepId, { state: "done", port: "join", summary: `${batch.length} done` });
+  record(run, { stepId, state: "done", port: "join", summary: `${batch.length} done at once` });
+  run.queue.unshift(...follow(step, "join"));
   return advance(wf, run);
 }
 

@@ -1,0 +1,42 @@
+{
+ "circuit": 1,
+ "name": "Inbox triage & reply",
+ "description": "Reads the unread inbox, works out what each message wants, and drafts the easy replies for you to approve.",
+ "entry": "watch",
+ "inputs": [
+  { "name": "voice", "description": "Whose voice the replies should sound like", "required": true },
+  { "name": "limit", "description": "How many threads to work through in one pass", "required": false, "default": 5 }
+ ],
+ "steps": [
+  { "id": "watch", "type": "trigger.watch", "title": "Look for new mail",
+    "config": { "tool": "Gmail:search_threads", "arguments": { "q": "in:inbox is:unread -from:me" } },
+    "next": [{ "port": "out", "to": "each" }] },
+  { "id": "each", "type": "logic.each", "title": "For each thread",
+    "config": { "list": "trigger.threads", "limit": 5 },
+    "next": [{ "port": "out", "to": "bulk" }, { "port": "done", "to": "recap" }] },
+  { "id": "bulk", "type": "logic.filter", "title": "Skip the bulk mail",
+    "config": { "all": [{ "field": "item.from", "op": "missing", "value": "" }], "any": [] },
+    "next": [{ "port": "out", "to": "intent" }] },
+  { "id": "intent", "type": "model.classify", "title": "Read what they want",
+    "config": { "labels": ["sales", "scheduling", "other"], "input": "item",
+      "instructions": "Anything asking about price, plans or a demo is sales." },
+    "next": [{ "port": "sales", "to": "draft" }, { "port": "scheduling", "to": "slots" }, { "port": "other", "to": "label" }] },
+  { "id": "draft", "type": "model.write", "title": "Draft a sales reply",
+    "config": { "instructions": "Answer their question directly, then offer a call.",
+      "voice": "{{input.voice}}", "context": ["item"], "maxWords": 140 },
+    "next": [{ "port": "out", "to": "gate" }] },
+  { "id": "gate", "type": "gate.approve", "title": "Hold for my approval",
+    "config": { "preview": "steps.draft.text", "question": "Send this reply?" },
+    "next": [{ "port": "out", "to": "send" }] },
+  { "id": "send", "type": "tool.call", "title": "Send the reply",
+    "config": { "tool": "Gmail:reply", "arguments": { "thread_id": "{{item.id}}", "body": "{{steps.draft.text}}" } },
+    "next": [] },
+  { "id": "slots", "type": "tool.call", "title": "Find open slots",
+    "config": { "tool": "Google_Calendar:list_events", "arguments": { "days": 5 } }, "next": [] },
+  { "id": "label", "type": "tool.call", "title": "Label it for a human",
+    "config": { "tool": "Gmail:label_thread", "arguments": { "thread_id": "{{item.id}}", "label": "needs-human" } },
+    "next": [] },
+  { "id": "recap", "type": "note.say", "title": "Tell me what happened",
+    "config": { "template": "Went through the unread inbox." }, "next": [] }
+ ]
+}

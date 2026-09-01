@@ -20,7 +20,10 @@ type Moment = {
   summary?: string; error?: string; input?: unknown; output?: unknown; item?: unknown;
 };
 type Board = {
-  workflow: { id: string; name: string; description: string; status: string; entry: string; steps: Chip[] };
+  workflow: {
+    id: string; name: string; description: string; status: string; entry: string;
+    steps: Chip[]; inputs?: { name: string; description?: string; required?: boolean }[];
+  };
   run: {
     id: string; status: string; mode: string; trace: Trace[];
     awaiting: { stepId: string; act: string } | null; failedAt?: string | null;
@@ -32,7 +35,7 @@ type Board = {
   directive?: Directive | null;
 };
 
-const COL_W = 224, LANE_H = 164, PAD_X = 24, PAD_Y = 24, NODE_W = 180;
+const COL_W = 220, LANE_H = 152, PAD_X = 24, PAD_Y = 22, NODE_W = 180;
 
 const app = new AppClient(
   { name: "Circuit board", version: "0.1.0", title: "Circuit" },
@@ -42,7 +45,11 @@ const app = new AppClient(
 let board: Board | null = null;
 let building: Partial<Chip>[] = [];
 let selected: string | null = null;
-let fitted = false;
+let fitted = true;
+/** whether the board is wider than the panel it is sitting in */
+let overflows = false;
+/** the CSS scale the canvas is currently drawn at (1 unless fitted down) */
+let scale = 1;
 let wiring: { from: string; port: string; x: number; y: number } | null = null;
 /** index into run.history while replaying, or null when showing the final state */
 let replayAt: number | null = null;
@@ -113,10 +120,19 @@ app.h.ontoolresult = (p: any) => {
     } else if (tools && !tools.bound && tools.present.length) {
       consoleState = { label: wf.name, sub: "connectors unchecked", busy: false };
       logLines = ["needs these connector tools:", ...tools.present.map((t) => `  ${t}`)];
-    } else if (tools?.present?.length) {
-      logLines = ["all connectors check out:", ...tools.present.map((t) => `  ${t}`)];
     } else {
-      logLines = wf.steps.map((s) => `${pad(s.id, 14)}${s.title}`);
+      const needs = tools?.present ?? [];
+      const asks = (wf.inputs ?? []).map((i) => i.name);
+      logLines = [
+        ...(needs.length ? [`connectors  ${needs.join(", ")}`] : []),
+        ...(asks.length ? [`asks for    ${asks.join(", ")}`] : []),
+        `steps       ${wf.steps.length}, starting at ${wf.entry}`,
+      ];
+      consoleState = {
+        label: wf.name,
+        sub: tools?.bound ? "every connector checks out" : `${wf.status === "armed" ? "armed" : "draft"}`,
+        busy: false,
+      };
     }
   }
   render();
@@ -203,7 +219,7 @@ function shell(inner: string, extra = "") {
       <span class="lab num" id="wfmeta">${esc(meta)}</span>
       <span class="sp"></span>
       ${history().length ? `<button id="btn-replay" class="ghost">${replaying() ? "Latest" : "Replay"}</button>` : ""}
-      ${wf ? `<button id="btn-fit" class="ghost">${fitted ? "Actual size" : "Fit"}</button>` : ""}
+      ${wf && overflows ? `<button id="btn-fit" class="ghost">${fitted ? "Actual size" : "Fit"}</button>` : ""}
       ${wf ? `<button id="btn-full" class="ghost">Full screen</button>` : ""}
       ${wf?.description ? `<span class="why">${esc(wf.description)}</span>` : ""}
     </div>
@@ -419,12 +435,19 @@ function troubleHtml(stepId: string) {
   </div>`;
 }
 
+/** true when some wire has to take the bus below the board */
+function needsBus(steps: Chip[]): boolean {
+  const col = new Map(steps.map((s) => [s.id, s.position?.col ?? 0]));
+  return steps.some((s) => s.next.some((w) => Math.abs((col.get(w.to) ?? 0) - (col.get(s.id) ?? 0)) > 1.6));
+}
+
 function sizeCanvas(steps: Chip[]) {
   const maxCol = Math.max(0, ...steps.map((s) => s.position?.col ?? 0));
   const maxLane = Math.max(0, ...steps.map((s) => s.position?.lane ?? 0));
   const c = el("canvas")!;
   const w = PAD_X * 2 + maxCol * COL_W + NODE_W;
-  const h = PAD_Y * 2 + maxLane * LANE_H + 168;
+  // only leave room under the board when something actually runs down there
+  const h = PAD_Y * 2 + maxLane * LANE_H + (needsBus(steps) ? 172 : 126);
   c.style.minWidth = `${w}px`;
   c.style.height = `${h}px`;
   applyFit(w, h);
@@ -435,16 +458,27 @@ function applyFit(w: number, h: number) {
   const c = el("canvas") as HTMLElement | null;
   const wrap = el("scroll") as HTMLElement | null;
   if (!c || !wrap) return;
+  const was = overflows;
+  overflows = w > wrap.clientWidth - 2;
+  if (was !== overflows) requestAnimationFrame(() => { if (board) render(); });
   if (!fitted) {
+    scale = 1;
     c.style.transform = "";
     c.style.transformOrigin = "";
     wrap.style.height = "";
+    wrap.style.overflowX = "auto";
     return;
   }
-  const scale = Math.min(1, (wrap.clientWidth - 2) / w);
+  const s = Math.min(1, (wrap.clientWidth - 2) / w);
+  if (s >= 1) {
+    scale = 1;
+    c.style.transform = ""; wrap.style.height = ""; wrap.style.overflowX = "auto";
+    return;
+  }
+  scale = s;
   c.style.transformOrigin = "0 0";
-  c.style.transform = `scale(${scale})`;
-  wrap.style.height = `${Math.ceil(h * scale)}px`;
+  c.style.transform = `scale(${s})`;
+  wrap.style.height = `${Math.ceil(h * s)}px`;
   wrap.style.overflowX = "hidden";
 }
 
@@ -454,9 +488,11 @@ function applyFit(w: number, h: number) {
  * runs there, the way a long trace avoids the components in its way, instead of
  * cutting straight through a chip.
  */
-function path(a: DOMRect, b: DOMRect, host: DOMRect, offset: number, busY: number) {
-  const x1 = a.right - host.left, y1 = a.top - host.top + a.height / 2 + offset;
-  const x2 = b.left - host.left, y2 = b.top - host.top + b.height / 2;
+type Box = { x: number; y: number; w: number; h: number };
+
+function path(a: Box, b: Box, offset: number, busY: number) {
+  const x1 = a.x + a.w, y1 = a.y + a.h / 2 + offset;
+  const x2 = b.x, y2 = b.y + b.h / 2;
   const p: [number, number, number, number] = [x1, y1, x2, y2];
   if (Math.abs(y2 - y1) < 1) return { d: `M${x1} ${y1} L${x2} ${y2}`, p };
 
@@ -534,15 +570,19 @@ function runInFlight() {
  * leaves the chip — so pulling a wire starts from the thing the wire comes out
  * of, rather than from some abstract edge of the card.
  */
+/** Layout coordinates, unaffected by any CSS scale the fit applies. */
+function boxOf(id: string) {
+  const n = document.querySelector<HTMLElement>(`.node[data-id="${CSS.escape(id)}"]`);
+  return n ? { x: n.offsetLeft, y: n.offsetTop, w: n.offsetWidth, h: n.offsetHeight } : null;
+}
+
 function drawHandles(steps: Chip[]) {
   const canvasEl = el("canvas")!;
   canvasEl.querySelectorAll(".handle").forEach((h) => h.remove());
   if (board?.run) return;               // wiring is a design-time act
-  const host = canvasEl.getBoundingClientRect();
   for (const s of steps) {
-    const node = document.querySelector<HTMLElement>(`.node[data-id="${CSS.escape(s.id)}"]`);
-    if (!node) continue;
-    const r = node.getBoundingClientRect();
+    const r = boxOf(s.id);
+    if (!r) continue;
     const ports = s.ports?.length ? s.ports : ["out"];
     ports.forEach((port, i) => {
       const off = ports.length > 1 ? (i - (ports.length - 1) / 2) * 16 : 0;
@@ -550,8 +590,8 @@ function drawHandles(steps: Chip[]) {
       h.className = "handle";
       h.dataset.from = s.id;
       h.dataset.port = port;
-      h.style.left = `${r.right - host.left}px`;
-      h.style.top = `${r.top - host.top + r.height / 2 + off}px`;
+      h.style.left = `${r.x + r.w}px`;
+      h.style.top = `${r.y + r.h / 2 + off}px`;
       h.innerHTML = ports.length > 1 ? `<span class="tip">${esc(portName(s.type, port))}</span>` : "";
       canvasEl.appendChild(h);
     });
@@ -560,10 +600,8 @@ function drawHandles(steps: Chip[]) {
 
 function drawTraces(steps: Chip[]) {
   const svg = el("traces")!;
-  const canvasEl = el("canvas")!;
-  const host = canvasEl.getBoundingClientRect();
-  const busY = Math.max(...steps.map((s) => (s.position?.lane ?? 0))) * LANE_H + PAD_Y + 148;
-  const rect = (id: string) => document.querySelector(`.node[data-id="${CSS.escape(id)}"]`)?.getBoundingClientRect();
+  const busY = Math.max(...steps.map((s) => (s.position?.lane ?? 0))) * LANE_H + PAD_Y + 140;
+  const rect = boxOf;
   const NS = "http://www.w3.org/2000/svg";
   svg.innerHTML = "";
   for (const s of steps) {
@@ -572,7 +610,7 @@ function drawTraces(steps: Chip[]) {
     s.next.forEach((w, i) => {
       const b = rect(w.to); if (!b) return;
       const offset = multi ? (i - (s.next.length - 1) / 2) * 16 : 0;
-      const r = path(a, b, host, offset, busY);
+      const r = path(a, b, offset, busY);
       const hot = ["done", "running"].includes(stateOf(s.id)) &&
         (portAt(s.id) ?? "out") === (w.port ?? "out") &&
         stateOf(w.to) !== "idle" && stateOf(w.to) !== "skipped";
@@ -714,7 +752,7 @@ function startWire(ev: PointerEvent, handle: HTMLElement) {
   handle.setPointerCapture(ev.pointerId);
 
   const move = (e: PointerEvent) => {
-    const x = e.clientX - host.left, y = e.clientY - host.top;
+    const x = (e.clientX - host.left) / scale, y = (e.clientY - host.top) / scale;
     const bend = Math.max(14, Math.abs(x - x0) * 0.4);
     draft.setAttribute("d", `M${x0} ${y0} L${x0 + bend} ${y0} L${x - 10} ${y} L${x} ${y}`);
   };
@@ -754,8 +792,8 @@ function startDrag(ev: PointerEvent, node: HTMLElement) {
   node.classList.add("dragging");
 
   const move = (e: PointerEvent) => {
-    const dx = e.clientX - startX, dy = e.clientY - startY;
-    if (!moved && Math.abs(dx) + Math.abs(dy) < 4) return;
+    const dx = (e.clientX - startX) / scale, dy = (e.clientY - startY) / scale;
+    if (!moved && (Math.abs(dx) + Math.abs(dy)) * scale < 4) return;
     moved = true;
     const col = Math.max(0, Math.round(from.col + dx / COL_W));
     const lane = Math.max(0, Math.round(from.lane + dy / LANE_H));

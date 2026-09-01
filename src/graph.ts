@@ -24,6 +24,14 @@ export const StepSchema = z.object({
 });
 export type Step = z.infer<typeof StepSchema>;
 
+export const InputSchema = z.object({
+  name: z.string().describe("Reachable in every step as {{input.<name>}}."),
+  description: z.string().default("").describe("What to put here, in the words you'd ask the user."),
+  required: z.boolean().default(true),
+  default: z.any().optional().describe("Used when the run does not supply one."),
+});
+export type WorkflowInput = z.infer<typeof InputSchema>;
+
 export const WorkflowSpecSchema = z.object({
   name: z.string().describe("Short name, e.g. 'Inbox triage & reply'."),
   description: z.string().default("").describe("One line on what it does and when it fires."),
@@ -38,6 +46,7 @@ export type Workflow = {
   name: string;
   description: string;
   steps: Step[];
+  inputs?: WorkflowInput[];
   entry: string;
   status: "draft" | "armed";
   version: number;
@@ -95,12 +104,12 @@ export type Run = {
   startedAt: string;
   endedAt?: string;
   /** everything a template can reach: {{trigger.x}}, {{steps.id.y}}, {{item.z}} */
-  data: { trigger: any; steps: Record<string, any>; item?: any };
+  data: { trigger: any; steps: Record<string, any>; input?: Record<string, any>; item?: any };
   /** depth-first list of steps still to visit */
   queue: string[];
   loops: LoopFrame[];
   /** the step Claude is currently working on, if any */
-  awaiting: { stepId: string; act: string } | null;
+  awaiting: { stepId: string; act: string; batch?: string[] } | null;
   /** how many times each step has been handed out, for retry limits */
   attempts?: Record<string, number>;
   /** the step a failed run stopped on, so it can be picked up again */

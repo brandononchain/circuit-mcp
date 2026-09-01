@@ -234,10 +234,16 @@ export const STEPS: StepDef[] = [
       "step — three lookups before a summary, say. Circuit walks the branches one after another, since " +
       "you do one thing at a time anyway; what this buys is the join, not speed.",
     ports: ["out", "join"],
-    config: z.object({}),
-    summary: (_c, step) => {
+    config: z.object({
+      together: z.boolean().default(false).describe(
+        "Hand Claude every branch at once instead of one at a time, so three lookups cost one turn " +
+        "rather than three. Only allowed when every branch is a single tool.call with nothing after " +
+        "it — that is the shape where doing them together is unambiguous."),
+    }),
+    summary: (c, step) => {
       const n = (step?.next ?? []).filter((e) => (e.port ?? "out") === "out").length;
-      return n ? `${n} branch${n === 1 ? "" : "es"}, then carries on` : "nothing wired yet";
+      if (!n) return "nothing wired yet";
+      return c?.together ? `${n} at once, then carries on` : `${n} in turn, then carries on`;
     },
   },
   {

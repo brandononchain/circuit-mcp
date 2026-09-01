@@ -269,5 +269,44 @@ while (bd && bd.act !== "done" && bd.act !== "blocked" && g++ < 12) {
 console.log("order:", order.join(" → "), "|", JSON.stringify(bd));
 console.log("join fired after all three:", order.indexOf("sum") === order.length - 1 && order.includes("a") && order.includes("b") && order.includes("c"));
 
+/* ---- together: several calls in one turn ---- */
+console.log("\n--- together ---");
+const tg = await client.callTool({ name: "circuit_design", arguments: {
+  name: "Gather at once",
+  steps: [
+    { id: "go", type: "trigger.ask", title: "When I ask", config: {}, next: [{ port: "out", to: "all" }] },
+    { id: "all", type: "logic.branches", title: "Gather everything", config: { together: true },
+      next: [{ port: "out", to: "a" }, { port: "out", to: "b" }, { port: "out", to: "c" }, { port: "join", to: "sum" }] },
+    { id: "a", type: "tool.call", title: "Threads", config: { tool: "Gmail:search_threads", arguments: {} }, next: [] },
+    { id: "b", type: "tool.call", title: "Calendar", config: { tool: "Google_Calendar:list_events", arguments: {} }, next: [] },
+    { id: "c", type: "tool.call", title: "Labels", config: { tool: "Gmail:label_thread", arguments: {} },
+      onError: { do: "skip" }, next: [] },
+    { id: "sum", type: "note.say", title: "Summarise", config: { template: "Done." }, next: [] },
+  ],
+} });
+const tgId = tg.structuredContent.workflow.id;
+console.log("chip says:", tg.structuredContent.workflow.steps.find(s => s.id === "all").summary);
+let tr = await client.callTool({ name: "circuit_run", arguments: { workflowId: tgId } });
+const trid = tr.structuredContent.run.id;
+let tdd = tr.structuredContent.directive;
+console.log("directive:", tdd.act, "with", tdd.calls?.length, "calls:", tdd.calls?.map(c => c.tool).join(", "));
+tr = await client.callTool({ name: "circuit_step", arguments: { runId: trid, stepId: "all",
+  results: { a: { threads: [1, 2] }, b: { events: [] } }, errors: { c: "label not found" } } });
+console.log("after one turn:", JSON.stringify(tr.structuredContent.directive));
+console.log("states:", tr.structuredContent.run.trace.filter(t => "abc".includes(t.stepId))
+  .map(t => `${t.stepId}:${t.state}`).join(" "));
+
+const badTogether = await client.callTool({ name: "circuit_design", arguments: {
+  name: "Bad together",
+  steps: [
+    { id: "go", type: "trigger.ask", title: "x", config: {}, next: [{ port: "out", to: "all" }] },
+    { id: "all", type: "logic.branches", title: "y", config: { together: true },
+      next: [{ port: "out", to: "a" }, { port: "out", to: "b" }] },
+    { id: "a", type: "tool.call", title: "z", config: { tool: "Gmail:reply", arguments: {} }, next: [{ port: "out", to: "b" }] },
+    { id: "b", type: "model.write", title: "w", config: { instructions: "hi" }, next: [] },
+  ],
+} });
+console.log("together guard:", badTogether.isError, "|", badTogether.content[0].text.split("\n")[1]?.trim());
+
 await client.close();
 console.log("\nSMOKE OK");

@@ -11,3 +11,4 @@ scripts/fixtures.json
 h-*.png
 !docs/*.png
 shot*.mjs
+exported.html

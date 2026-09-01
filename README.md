@@ -91,6 +91,46 @@ Suggestions come from bigram similarity weighted toward the connector: a near-mi
 
 Binding is optional. Without it Circuit says plainly that it could not check, and gets out of the way.
 
+## Workflows you can keep
+
+A board lives in a conversation, and conversations end. `circuit_export` writes a
+workflow out as a **standalone page** — the board drawn out, what every step does
+in plain English, the connectors it needs, and the definition itself — which
+Claude publishes as an artifact you own. It's yours across conversations, and you
+can share it.
+
+<img src="docs/saved-workflow.png" alt="A workflow saved as a standalone page" width="100%">
+
+No scripts, no external anything: the board is laid out server-side into absolute
+divs and an SVG, so it draws identically forever. Fixed chip heights are what
+make that possible — geometry has to be knowable without a browser to measure it
+in.
+
+Paste that page's link into any future conversation and say **restore this
+workflow**. `circuit_import` finds the definition inside the page — you don't
+have to extract anything — and rebuilds the board as a draft. Tool names come
+back exactly as saved, so Circuit re-checks them against *your* connectors, which
+is what makes a workflow safe to accept from someone else.
+
+There are three starter boards in [`examples/`](examples/) in the same format.
+
+## Workflows can take input
+
+A board that hardcodes a name, an address or a search term serves exactly one
+case. Declare inputs instead:
+
+```jsonc
+"inputs": [
+  { "name": "voice",   "description": "Whose voice the replies should sound like" },
+  { "name": "limit",   "description": "How many threads per pass", "required": false, "default": 5 }
+]
+```
+
+They're reachable everywhere as `{{input.voice}}`, and `circuit_run` refuses to
+start without the required ones, naming what it needs so Claude knows to ask
+rather than guess. This is what turns a saved workflow from a snapshot of your
+setup into something someone else can actually use.
+
 ## Runs are replayable
 
 A run records what every step was **handed** and what came **back**, so a
@@ -217,7 +257,7 @@ Twelve types. Four are settled by Circuit itself; the rest become directives.
 | **only if** | `logic.filter` | **Circuit** | Stops the path unless the conditions hold. |
 | **route** | `logic.branch` | **Circuit** | Routes on a value it already has. |
 | **for each** | `logic.each` | **Circuit** | Runs everything downstream once per item, with a hard limit. |
-| **all of** | `logic.branches` | **Circuit** | Fans out to several branches and continues at `join` once every one has finished. |
+| **all of** | `logic.branches` | **Circuit** | Fans out to several branches and continues at `join` once every one has finished. Set `together` and every branch goes out in one directive, answered in a single turn. |
 | **ask you** | `gate.approve` | you | Parks the run and shows you an editable preview on the board. |
 | **report** | `note.say` | Claude | Reports back in the conversation. |
 
@@ -281,6 +321,8 @@ Thirteen tools, one capability each. Three are invisible to the model.
 | `circuit_step` | model + app | Reports a result — or an `error` — and returns the next directive. |
 | `circuit_resume` | app + model | Picks a failed run back up, retrying or skipping the step that broke. |
 | `circuit_runs` | model + app | History. |
+| `circuit_export` | model | Writes the workflow out as a page to publish as an artifact. |
+| `circuit_import` | model + app | Rebuilds a saved workflow from that page, or from JSON. |
 | `circuit_arm` · `circuit_disarm` | model + app | Marks a workflow live, and tells Claude how to schedule it. |
 | `circuit_answer` | app + model | Approve or reject a held gate, with edits. |
 | `circuit_move` | **app only** | Persists a drag. Invisible to the model, so a nudge never costs a turn. |
@@ -413,9 +455,11 @@ There is deliberately no third row. Circuit stores workflows and run history; it
 - [x] A test mode that actually withholds writes, and an arm that refuses unguarded ones
 - [x] Wire editing on the canvas — drag from a port to a chip, hover a wire to cut it
 - [x] Run replay: scrub a past run and see what every step was given
-- [x] Fan-out with a join (`logic.branches`)
-- [ ] Concurrency — one directive carrying several tool calls, answered together
-- [ ] Workflow inputs, and an export format so boards are shareable
+- [x] Fan-out with a join, and `together` for several calls in one turn
+- [x] Workflow inputs
+- [x] Save a workflow as an artifact you keep, and restore it anywhere
+- [ ] Sub-workflows — one board calling another
+- [ ] Multi-user hosting and per-step failure rates
 
 The reasoning behind the order, and what Circuit deliberately will not do, is in
 [ROADMAP.md](ROADMAP.md).

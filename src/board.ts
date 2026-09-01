@@ -15,6 +15,7 @@ export function toBoard(wf: Workflow, run?: Run | null, extra: Record<string, un
       description: wf.description,
       status: wf.status,
       entry: wf.entry,
+      inputs: wf.inputs ?? [],
       steps: wf.steps.map((s) => ({
         id: s.id,
         type: s.type,
@@ -39,6 +40,7 @@ export function toBoard(wf: Workflow, run?: Run | null, extra: Record<string, un
           startedAt: run.startedAt, endedAt: run.endedAt,
           trace: run.trace, awaiting: run.awaiting ?? null, failedAt: run.failedAt ?? null,
           history: run.history ?? [],
+          input: run.data?.input ?? {},
         }
       : null,
     storage: storeKind(),
@@ -56,7 +58,9 @@ export function describe(wf: Workflow, run?: Run | null): string {
     const wires = s.next.map((e) => `${e.port === "out" ? "" : e.port + "→"}${e.to}`).join(", ");
     return `  ${s.id}  ${s.type}  "${s.title}"${wires ? `  → ${wires}` : ""}${mark}`;
   });
-  const head = `${wf.name} (${wf.id}) — ${wf.status}, ${wf.steps.length} steps, entry: ${wf.entry}`;
+  const ins = (wf.inputs ?? []).map((i) => i.name).join(", ");
+  const head = `${wf.name} (${wf.id}) — ${wf.status}, ${wf.steps.length} steps, entry: ${wf.entry}` +
+    (ins ? `\n  asks for: ${ins}` : "");
   const tail = run
     ? `\nrun ${run.id}: ${run.status}` +
       (run.awaiting ? ` — at ${run.awaiting.stepId}` : "") +

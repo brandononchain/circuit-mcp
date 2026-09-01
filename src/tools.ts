@@ -162,6 +162,39 @@ export function unguardedWrites(wf: Workflow): { stepId: string; tool: string }[
     .map((s) => ({ stepId: s.id, tool: String((s.config as any)?.tool ?? s.type) }));
 }
 
+/**
+ * `together` hands several calls out in one directive, which only makes sense
+ * when each branch is exactly one connector call. Anything else — a branch with
+ * a second step, a retry policy that would need its own round trip — has no
+ * unambiguous meaning, so it is refused while the board is being drawn.
+ */
+export function checkTogether(wf: Workflow): string[] {
+  const byId = new Map(wf.steps.map((s) => [s.id, s]));
+  const problems: string[] = [];
+  for (const s of wf.steps) {
+    if (s.type !== "logic.branches" || !(s.config as any)?.together) continue;
+    const heads = s.next.filter((e) => (e.port ?? "out") === "out").map((e) => e.to);
+    if (heads.length < 2) problems.push(`${s.id}: 'together' needs at least two branches.`);
+    for (const id of heads) {
+      const h = byId.get(id);
+      if (!h) continue;
+      if (h.type !== "tool.call") {
+        problems.push(`${s.id} → ${id}: only tool.call steps can go together, and ${id} is ${h.type}.`);
+      }
+      if (h.next.length) {
+        problems.push(`${s.id} → ${id}: ${id} has steps after it, so it cannot go in a 'together' batch. ` +
+          `Wire that work after the join instead.`);
+      }
+      const policy = h.onError?.do;
+      if (policy === "retry" || policy === "route") {
+        problems.push(`${s.id} → ${id}: onError '${policy}' needs its own round trip, so it cannot go together. ` +
+          `Use stop or skip.`);
+      }
+    }
+  }
+  return problems;
+}
+
 /** Which connectors a board touches, for the header line on the app. */
 export function servicesOf(wf: Workflow): string[] {
   return [...new Set(requiredTools(wf.steps).map((t) => t.tool.split(/[:.]/)[0]))];
