@@ -15,7 +15,7 @@
     "config": { "list": "trigger.threads", "limit": 5 },
     "next": [{ "port": "out", "to": "bulk" }, { "port": "done", "to": "recap" }] },
   { "id": "bulk", "type": "logic.filter", "title": "Skip the bulk mail",
-    "config": { "all": [{ "field": "item.from", "op": "missing", "value": "" }], "any": [] },
+    "config": { "all": [{ "field": "item.from", "op": "exists", "value": "" }], "any": [] },
     "next": [{ "port": "out", "to": "intent" }] },
   { "id": "intent", "type": "model.classify", "title": "Read what they want",
     "config": { "labels": ["sales", "scheduling", "other"], "input": "item",
