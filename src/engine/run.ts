@@ -286,17 +286,24 @@ export function report(wf: Workflow, run: Run, stepId: string, result: any): Dir
   return advance(wf, run);
 }
 
+/** A person reads this on the chip, so count things rather than naming keys. */
 function describeResult(r: any): string {
-  if (r == null) return "done";
-  if (typeof r === "string") return `${r.split(/\s+/).length} words`;
-  if (Array.isArray(r)) return `${r.length} items`;
+  if (r == null) return "ran";
+  if (typeof r === "string") return `${count(r.split(/\s+/).length, "word")}`;
+  if (Array.isArray(r)) return count(r.length, "item");
   if (typeof r === "object") {
-    if (typeof r.text === "string") return `${r.text.split(/\s+/).length} words`;
-    const keys = Object.keys(r);
-    return keys.length ? keys.slice(0, 3).join(", ") : "done";
+    if (typeof r.text === "string") return count(r.text.split(/\s+/).length, "word");
+    // {threads: [...]} reads far better as "2 threads" than as "threads"
+    const listy = Object.entries(r).find(([, v]) => Array.isArray(v));
+    if (listy) return count((listy[1] as unknown[]).length, singular(listy[0]));
+    const keys = Object.keys(r).filter((k) => !/^(ok|success|status|id|ids|uuid|key)$/i.test(k));
+    if (!keys.length) return "ran";
+    return keys.length <= 2 ? keys.join(" and ") : `${keys.length} fields`;
   }
   return String(r);
 }
+const count = (n: number, noun: string) => `${n} ${noun}${n === 1 ? "" : "s"}`;
+const singular = (s: string) => s.replace(/ies$/, "y").replace(/s$/, "");
 
 function write(data: any, path: string, value: unknown) {
   const parts = path.split(".");

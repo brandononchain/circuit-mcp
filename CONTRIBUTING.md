@@ -40,6 +40,13 @@ add its directive shape in `src/engine/run.ts` and a line exercising it in
 themes. The visual system is documented in the README; the short version is
 that chips are chips, traces are copper, and nothing is round.
 
+**Words on the board are part of the design.** A chip says what it does in
+language the person reading it already knows — "sorts into sales, scheduling or
+other", not `labels: [...]`. Type names, dot paths and raw config belong in the
+inspector, which is one click away. If you add a step type, write its `summary`
+as a sentence fragment a non-engineer would understand, and give it a `label`
+that is a verb.
+
 **Integrations do not belong here.** Circuit's premise is that it holds no
 credentials and reaches nothing on its own. If a workflow needs a new service,
 that service is an MCP connector the user adds to Claude — not a module in this

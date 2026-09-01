@@ -12,6 +12,8 @@ export type Kind = "trigger" | "tool" | "model" | "logic" | "gate" | "note";
 export type StepDef = {
   type: string;
   kind: Kind;
+  /** The verb printed on the chip. What this step DOES, not what class it is. */
+  label: string;
   title: string;
   blurb: string;
   /** who does the work */
@@ -57,11 +59,40 @@ export function matches(cfg: z.infer<typeof MatchSchema>, data: any) {
   const any = (cfg.any ?? []).length === 0 || (cfg.any ?? []).some((c) => test(c, data));
   return all && any;
 }
+/* ------------------------------------------------------ plain English bits */
+
+const VERB: Record<string, string> = {
+  equals: "is", contains: "contains", matches: "looks like",
+  exists: "is there", missing: "is empty", gt: "is over", lt: "is under",
+};
+
+/** "sender contains noreply and subject is there" */
 function describeMatch(c: any): string {
-  const parts = [...(c?.all ?? []), ...(c?.any ?? [])]
-    .map((x: Cond) => `${x.field.split(".").pop()} ${x.op}${x.value ? " " + x.value : ""}`);
-  if (!parts.length) return "no conditions";
-  return parts.slice(0, 2).join(" · ") + (parts.length > 2 ? ` +${parts.length - 2}` : "");
+  const one = (x: Cond) => {
+    const field = (x.field ?? "").split(".").pop() || "it";
+    const value = x.value ? ` \u201c${x.value}\u201d` : "";
+    return `${field} ${VERB[x.op] ?? x.op}${value}`;
+  };
+  const all = (c?.all ?? []).map(one).join(" and ");
+  const any = (c?.any ?? []).map(one).join(" or ");
+  return [all, any].filter(Boolean).join(", and ") || "nothing set yet";
+}
+
+/** ["a","b","c"] -> "a, b or c" */
+export function list(items: string[], conj = "or"): string {
+  const xs = (items ?? []).filter(Boolean);
+  if (!xs.length) return "";
+  if (xs.length === 1) return xs[0];
+  return `${xs.slice(0, -1).join(", ")} ${conj} ${xs[xs.length - 1]}`;
+}
+
+/** "Gmail:search_threads" -> "Gmail | search threads" */
+export function humanTool(t?: string): string {
+  if (!t) return "no connector picked yet";
+  const [service, ...rest] = t.split(/[:.]/);
+  const action = rest.join(" ").replace(/[_-]+/g, " ").trim();
+  const svc = service.replace(/[_-]+/g, " ");
+  return action ? `${svc} \u00b7 ${action}` : svc;
 }
 
 /* ------------------------------------------------------------------ steps */
@@ -77,14 +108,14 @@ const ToolCall = z.object({
 
 export const STEPS: StepDef[] = [
   {
-    type: "trigger.ask", kind: "trigger", actor: "user",
+    type: "trigger.ask", kind: "trigger", label: "when", actor: "user",
     title: "When I ask",
     blurb: "The workflow runs when the user asks for it in the conversation. The default.",
     ports: ["out"], config: z.object({}),
-    summary: () => "on request",
+    summary: () => "you start it from the chat",
   },
   {
-    type: "trigger.schedule", kind: "trigger", actor: "user",
+    type: "trigger.schedule", kind: "trigger", label: "every", actor: "user",
     title: "On a schedule",
     blurb:
       "Runs on a schedule. Circuit stores the schedule; you set it up with the user's scheduled tasks " +
@@ -94,32 +125,32 @@ export const STEPS: StepDef[] = [
       cron: z.string().describe("5 field cron, UTC."),
       note: z.string().default("").describe("Plain English version, for the chip."),
     }),
-    summary: (c) => c.note || c.cron || "unscheduled",
+    summary: (c) => c.note || c.cron || "no schedule set yet",
   },
   {
-    type: "trigger.watch", kind: "trigger", actor: "claude",
+    type: "trigger.watch", kind: "trigger", label: "watch", actor: "claude",
     title: "When something new shows up",
     blurb:
       "Runs a connector tool to look for new items, and starts one pass per item found. " +
       "Pair it with logic.each when the tool returns a list.",
     ports: ["out"],
     config: ToolCall,
-    summary: (c) => c.tool || "no tool bound",
+    summary: (c) => humanTool(c.tool),
   },
 
   {
-    type: "tool.call", kind: "tool", actor: "claude",
+    type: "tool.call", kind: "tool", label: "do", actor: "claude",
     title: "Use a connector",
     blurb:
       "The workhorse. Names a tool from the user's own connectors and the arguments to call it with. " +
       "Circuit resolves the templates and hands you the call; you make it and report the result back.",
     ports: ["out"],
     config: ToolCall,
-    summary: (c) => c.tool || "no tool bound",
+    summary: (c) => humanTool(c.tool),
   },
 
   {
-    type: "model.classify", kind: "model", actor: "claude",
+    type: "model.classify", kind: "model", label: "decide", actor: "claude",
     title: "Decide which kind it is",
     blurb: "You read the input and pick one label. The label becomes the output port, so wires fan out from it.",
     ports: "dynamic",
@@ -128,10 +159,10 @@ export const STEPS: StepDef[] = [
       input: z.string().default("trigger").describe("Dot path to what should be read."),
       instructions: z.string().default("").describe("How to decide. Say what tips a borderline case."),
     }),
-    summary: (c) => (c.labels ?? []).join(" | ") || "no labels",
+    summary: (c) => c.labels?.length ? `sorts into ${list(c.labels)}` : "no buckets set yet",
   },
   {
-    type: "model.write", kind: "model", actor: "claude",
+    type: "model.write", kind: "model", label: "write", actor: "claude",
     title: "Write something",
     blurb: "You draft the text. Nothing is sent here — a later tool.call step does that.",
     ports: ["out"],
@@ -141,10 +172,11 @@ export const STEPS: StepDef[] = [
       context: z.array(z.string()).default(["trigger"]).describe("Dot paths to read before writing."),
       maxWords: z.number().default(160),
     }),
-    summary: (c) => [c.voice && `voice: ${c.voice}`, `≤${c.maxWords ?? 160} words`].filter(Boolean).join(" · "),
+    summary: (c) => [c.voice ? `in ${c.voice}’s voice` : "", `under ${c.maxWords ?? 160} words`]
+      .filter(Boolean).join(", "),
   },
   {
-    type: "model.extract", kind: "model", actor: "claude",
+    type: "model.extract", kind: "model", label: "read", actor: "claude",
     title: "Pull out the details",
     blurb: "You read the input and return the named fields as structured data.",
     ports: ["out"],
@@ -152,11 +184,11 @@ export const STEPS: StepDef[] = [
       fields: z.array(z.object({ name: z.string(), description: z.string() })).min(1),
       input: z.string().default("trigger"),
     }),
-    summary: (c) => (c.fields ?? []).map((f: any) => f.name).join(", ") || "no fields",
+    summary: (c) => c.fields?.length ? `pulls out ${list(c.fields.map((f: any) => f.name), "and")}` : "no fields set yet",
   },
 
   {
-    type: "logic.filter", kind: "logic", actor: "circuit",
+    type: "logic.filter", kind: "logic", label: "only if", actor: "circuit",
     title: "Continue only if",
     blurb: "Circuit checks the conditions itself and stops this path when they do not hold.",
     ports: ["out"],
@@ -164,7 +196,7 @@ export const STEPS: StepDef[] = [
     summary: (c) => describeMatch(c),
   },
   {
-    type: "logic.branch", kind: "logic", actor: "circuit",
+    type: "logic.branch", kind: "logic", label: "route", actor: "circuit",
     title: "Branch on a value",
     blurb: "Circuit sends the run down a named wire based on a value it already has.",
     ports: "dynamic",
@@ -173,10 +205,10 @@ export const STEPS: StepDef[] = [
       cases: z.array(z.object({ equals: z.string(), port: z.string() })).min(1),
       fallback: z.string().default("else"),
     }),
-    summary: (c) => `${c.field} → ${(c.cases ?? []).map((x: any) => x.port).join(" | ")}`,
+    summary: (c) => `on ${(c.field ?? "?").split(".").pop()}: ${list((c.cases ?? []).map((x: any) => x.port))}`,
   },
   {
-    type: "logic.each", kind: "logic", actor: "circuit",
+    type: "logic.each", kind: "logic", label: "for each", actor: "circuit",
     title: "For each",
     blurb:
       "Runs everything downstream once per item in a list. Inside the loop, {{item.…}} is the current item. " +
@@ -186,11 +218,11 @@ export const STEPS: StepDef[] = [
       list: z.string().describe("Dot path to the array, e.g. 'steps.search.threads'."),
       limit: z.number().default(10).describe("Stop after this many, so a big inbox cannot run away."),
     }),
-    summary: (c) => `${c.list ?? "?"} · max ${c.limit ?? 10}`,
+    summary: (c) => `one at a time, up to ${c.limit ?? 10}`,
   },
 
   {
-    type: "gate.approve", kind: "gate", actor: "user",
+    type: "gate.approve", kind: "gate", label: "ask you", actor: "user",
     title: "Hold for my approval",
     blurb:
       "Parks the run and shows the user what is about to happen, on the board, with an editable draft. " +
@@ -200,17 +232,17 @@ export const STEPS: StepDef[] = [
       preview: z.string().default("").describe("Dot path to what the user should look at, e.g. 'steps.draft.text'."),
       question: z.string().default("Send this?"),
     }),
-    summary: (c) => c.question || "waiting on you",
+    summary: (c) => c.question || "nothing moves until you say so",
   },
   {
-    type: "note.say", kind: "note", actor: "claude",
+    type: "note.say", kind: "note", label: "report", actor: "claude",
     title: "Tell me what happened",
     blurb: "You report back in the conversation. Good as the last step of a run.",
     ports: ["out"],
     config: z.object({
       template: z.string().describe("What to say. Templates resolve, e.g. 'Replied to {{item.from}}.'"),
     }),
-    summary: (c) => (c.template ?? "").slice(0, 40),
+    summary: (c) => c.template ? `\u201c${String(c.template).slice(0, 46)}\u201d` : "nothing to say yet",
   },
 ];
 
@@ -244,7 +276,7 @@ export function toolOf(step: Step): string | null {
 
 export function catalog() {
   return STEPS.map((s) => ({
-    type: s.type, kind: s.kind, title: s.title, blurb: s.blurb,
+    type: s.type, kind: s.kind, label: s.label, title: s.title, blurb: s.blurb,
     doneBy: s.actor,
     ports: s.ports === "dynamic" ? "dynamic — see blurb" : s.ports,
     config: sketch(s.config),

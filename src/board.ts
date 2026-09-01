@@ -15,6 +15,7 @@ export function toBoard(wf: Workflow, run?: Run | null, extra: Record<string, un
         id: s.id,
         type: s.type,
         kind: BY_TYPE.get(s.type)?.kind ?? "tool",
+        label: BY_TYPE.get(s.type)?.label ?? "step",
         actor: BY_TYPE.get(s.type)?.actor ?? "claude",
         title: s.title,
         summary: summarise(s),

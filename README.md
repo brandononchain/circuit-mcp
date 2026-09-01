@@ -92,20 +92,24 @@ For a public URL without a deploy, `npx localtunnel --port 8787` or `ngrok http 
 
 Twelve types. Four are settled by Circuit itself; the rest become directives.
 
-| Type | Who does it | What it is |
-| --- | --- | --- |
-| `trigger.ask` | you | Runs when you ask. The default. |
-| `trigger.schedule` | you | Stores a cron. Pair it with one of your scheduled tasks calling `circuit_run`. |
-| `trigger.watch` | Claude | Calls a connector tool to look for new items, and starts the run on what it finds. |
-| `tool.call` | Claude | **The workhorse.** Names a tool from your connectors and the arguments to call it with. |
-| `model.classify` | Claude | Reads the input and picks one label. The label becomes the output port. |
-| `model.write` | Claude | Drafts text. Sends nothing — a later `tool.call` does that. |
-| `model.extract` | Claude | Pulls named fields out of the input as structured data. |
-| `logic.filter` | **Circuit** | Stops the path unless the conditions hold. |
-| `logic.branch` | **Circuit** | Routes on a value it already has. |
-| `logic.each` | **Circuit** | Runs everything downstream once per item, with a hard limit. |
-| `gate.approve` | you | Parks the run and shows you an editable preview on the board. |
-| `note.say` | Claude | Reports back in the conversation. |
+| On the chip | Type | Who does it | What it is |
+| --- | --- | --- | --- |
+| **when** | `trigger.ask` | you | Runs when you ask. The default. |
+| **every** | `trigger.schedule` | you | Stores a cron. Pair it with one of your scheduled tasks calling `circuit_run`. |
+| **watch** | `trigger.watch` | Claude | Calls a connector tool to look for new items, and starts the run on what it finds. |
+| **do** | `tool.call` | Claude | **The workhorse.** Names a tool from your connectors and the arguments to call it with. |
+| **decide** | `model.classify` | Claude | Reads the input and picks one label. The label becomes the output port. |
+| **write** | `model.write` | Claude | Drafts text. Sends nothing — a later **do** step does that. |
+| **read** | `model.extract` | Claude | Pulls named fields out of the input as structured data. |
+| **only if** | `logic.filter` | **Circuit** | Stops the path unless the conditions hold. |
+| **route** | `logic.branch` | **Circuit** | Routes on a value it already has. |
+| **for each** | `logic.each` | **Circuit** | Runs everything downstream once per item, with a hard limit. |
+| **ask you** | `gate.approve` | you | Parks the run and shows you an editable preview on the board. |
+| **report** | `note.say` | Claude | Reports back in the conversation. |
+
+The left column is what you actually see. A chip says what it *does* — `model.classify`
+is a type name, **decide** is a thing a person recognizes — and the type only appears
+when you select the chip.
 
 Nothing here is Gmail-shaped, or Slack-shaped. `tool.call` is the integration layer, and its surface is whatever you have connected.
 
@@ -197,6 +201,30 @@ scripts/
   harness.ts            a local host, running the OFFICIAL AppBridge
   smoke.mjs             drives a full run over the wire
 ```
+
+### Reading a chip
+
+```
+ ╭─────────────────────────────╮
+ │ ○ decide          sales ─ … │   verb · what happened on the last run
+ ├─────────────────────────────┤
+ │ Read what they want         │   the title Claude wrote
+ │ sorts into sales,           │   what it does, in English, from the config
+ │ scheduling or other         │
+ │ [sales] [scheduling] [other]│   output ports — wires leave from these
+ ╰─────────────────────────────╯
+```
+
+The dot in the corner is a pin-1 mark and it carries information: **filled** means
+the step is yours, an **open ring** means Claude performs it, a **square** means
+Circuit settles it server-side without asking anyone. The status pill on the right
+is blank until a run touches the step — a board full of `IDLE` badges tells you
+nothing.
+
+Type is **Instrument Sans** throughout, with **Spline Sans Mono** reserved for
+things that really are identifiers: ports, step ids, and the run console. Config
+summaries are set in the sans, not the mono, so a board reads like a description
+rather than a stack trace.
 
 ### Layout
 

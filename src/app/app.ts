@@ -3,7 +3,8 @@ import { AppClient } from "./bridge.js";
 /* ------------------------------------------------------------------ types */
 type Wire = { port: string; to: string };
 type Chip = {
-  id: string; type: string; kind: string; actor?: string; title: string; summary: string;
+  id: string; type: string; kind: string; label?: string; actor?: string;
+  title: string; summary: string; config?: Record<string, unknown>;
   tool?: string | null; ports: string[]; next: Wire[]; enabled: boolean;
   position: { col: number; lane: number };
 };
@@ -31,6 +32,7 @@ const app = new AppClient(
 let board: Board | null = null;
 let building: Partial<Chip>[] = [];
 let selected: string | null = null;
+let fitted = false;
 let logLines: string[] = [];
 let consoleState = { label: "circuit", sub: "idle", busy: false };
 
@@ -111,74 +113,133 @@ function stateOf(id: string): string {
   const t = board?.run?.trace.find((x) => x.stepId === id);
   return t?.state ?? "idle";
 }
+const STATE_WORD: Record<string, string> = {
+  running: "running", done: "ran", skipped: "not taken",
+  held: "waiting on you", failed: "failed", idle: "",
+};
+
+/** Nothing at all before a run — an "IDLE" badge on every chip is just noise. */
 function labelOf(id: string): string {
   const t = board?.run?.trace.find((x) => x.stepId === id);
-  if (!t) return "idle";
-  const s = t.summary ?? t.state;
-  return s.length > 18 ? s.slice(0, 17) + "…" : s;
+  if (!t || t.state === "idle") return "";
+  const s = t.summary || STATE_WORD[t.state] || t.state;
+  return s.length > 20 ? s.slice(0, 19) + "\u2026" : s;
 }
 
 /* ----------------------------------------------------------------- render */
 function shell(inner: string, extra = "") {
   const wf = board?.workflow;
   const live = wf?.status === "armed";
+  const run = board?.run;
+  const meta = run
+    ? `${run.mode === "test" ? "rehearsal" : "live"} \u00b7 ${run.status.replace(/_/g, " ")}`
+    : wf ? `${wf.status === "armed" ? "armed" : "draft"} \u00b7 ${wf.steps.length} steps` : "drawing";
   return `
   <div class="frame">
     <div class="bar">
       <span class="dot ${live ? "live" : ""}"></span>
-      <span class="name" id="wfname" ${wf ? 'contenteditable="true" spellcheck="false"' : ""}>${esc(wf?.name ?? "Designing…")}</span>
-      <span class="lab" id="wfmeta">${wf ? `${wf.status} · ${wf.steps.length} steps` : "streaming"}</span>
+      <span class="name" id="wfname" ${wf ? 'contenteditable="true" spellcheck="false"' : ""}>${esc(wf?.name ?? "Drawing\u2026")}</span>
+      <span class="lab num" id="wfmeta">${esc(meta)}</span>
       <span class="sp"></span>
-      ${wf ? `<button id="btn-fit" class="ghost">Fit</button>` : ""}
-      ${wf ? `<button id="btn-full" class="ghost">Expand</button>` : ""}
+      ${wf ? `<button id="btn-fit" class="ghost">${fitted ? "Actual size" : "Fit"}</button>` : ""}
+      ${wf ? `<button id="btn-full" class="ghost">Full screen</button>` : ""}
+      ${wf?.description ? `<span class="why">${esc(wf.description)}</span>` : ""}
     </div>
-    <div class="scroll"><div class="canvas" id="canvas">
+    <div class="scroll" id="scroll"><div class="canvas" id="canvas">
       <svg id="traces" aria-hidden="true"></svg>
-      <span class="silk">${wf ? `${esc(wf.id)} · ${wf.steps.length} nodes` : "circuit"}</span>
+      <span class="silk mono">${wf ? `${esc(wf.id)}` : "circuit"}</span>
       ${inner}
     </div></div>
     <div class="console">
       <div class="rail">
         <div style="display:flex;align-items:center;gap:7px">
           <span class="spark ${consoleState.busy ? "" : "idle"}"></span>
-          <span class="lab">${esc(consoleState.label)}</span>
+          <span class="${/^(run|wf)_/.test(consoleState.label) ? "railid mono" : "lab"}">${esc(consoleState.label)}</span>
         </div>
-        <span class="sub mono">${esc(consoleState.sub)}</span>
+        <span class="sub">${esc(consoleState.sub)}</span>
       </div>
-      <pre class="log mono" id="log">${logLines.slice(-4).map(esc).join("\n")}${consoleState.busy ? '<span class="caret"></span>' : ""}</pre>
+      ${selected ? inspectorHtml() : `<pre class="log mono" id="log">${logLines.slice(-4).map(esc).join("\n")}${consoleState.busy ? '<span class="caret"></span>' : ""}</pre>`}
     </div>
     ${extra}
   </div>`;
 }
 
-function chipHtml(c: Partial<Chip>, i: number, state = "idle", label = "idle") {
+/** Clicking a chip swaps the log for what that step actually is. */
+function inspectorHtml() {
+  const c = board?.workflow.steps.find((s) => s.id === selected);
+  if (!c) return `<pre class="log mono"></pre>`;
+  const t = board?.run?.trace.find((x) => x.stepId === selected);
+  const who = { circuit: "Circuit, on its own", claude: "Claude", user: "you" }[c.actor ?? "claude"] ?? "Claude";
+  const cfg = JSON.stringify(c.config ?? {}, null, 1).replace(/\n\s*/g, " ");
+  return `<div class="insp"><dl>
+    <dt>step</dt><dd><code>${esc(c.id)}</code> \u00b7 <code>${esc(c.type)}</code></dd>
+    <dt>done by</dt><dd>${esc(who)}</dd>
+    ${c.ports.length > 1 ? `<dt>ports</dt><dd><code>${c.ports.map(esc).join(" \u00b7 ")}</code></dd>` : ""}
+    ${t && t.state !== "idle" ? `<dt>last run</dt><dd>${esc(t.summary || t.error || t.state)}</dd>` : ""}
+    <dt>settings</dt><dd><pre>${esc(cfg === "{}" ? "nothing to configure" : cfg)}</pre></dd>
+  </dl></div>`;
+}
+
+function chipHtml(c: Partial<Chip>, i: number, state = "idle", label = "") {
   const pos = c.position ?? { col: i, lane: 0 };
   const x = PAD_X + pos.col * COL_W, y = PAD_Y + pos.lane * LANE_H;
+
   const all = c.ports ?? [];
   const lit = board?.run?.trace.find((t) => t.stepId === c.id)?.port;
   const shown = all.length > 3 ? [...all.slice(0, 2), ...(lit && !all.slice(0, 2).includes(lit) ? [lit] : [])] : all;
   const ports = all.length > 1
     ? `<div class="no">${shown.map((p) =>
-        `<span class="op mono ${lit === p ? "lit" : ""}">${esc(p)}</span>`).join("")}${
+        `<span class="op mono ${lit === p ? "lit" : ""}">${esc(portName(c.type ?? "", p))}</span>`).join("")}${
         all.length > shown.length ? `<span class="op mono">+${all.length - shown.length}</span>` : ""}</div>`
     : "";
+
+  const actor = c.actor ?? "claude";
   const waiting = board?.run?.awaiting?.stepId === c.id;
-  const cls = ["node", state, waiting ? "waiting" : "", c.enabled === false ? "muted" : "",
-    selected === c.id ? "sel" : ""].join(" ");
-  const tool = c.tool
-    ? `<span class="tool mono"><b>${esc((c.tool.split(/[:.]/)[0] ?? "tool"))}</b><span>${esc(c.tool)}</span></span>`
-    : "";
+  const cls = ["node", state === "idle" ? "" : state, waiting ? "waiting" : "",
+    c.enabled === false ? "muted" : "", selected === c.id ? "sel" : ""].join(" ");
+
+  // "Gmail · search threads" reads better with the service carrying the weight
+  const [head, ...tail] = String(c.summary ?? "").split(" · ");
+  const summary = tail.length
+    ? `<b>${esc(head)}</b> ${esc(tail.join(" · "))}`
+    : esc(c.summary ?? "");
+
   return `<div class="${cls}" data-id="${esc(c.id!)}" style="left:${x}px;top:${y}px">
-    <div class="nh"><span class="p1"></span><span class="lab nk">${esc(c.kind ?? kindOf(c.type ?? ""))}</span>
-      <span class="ns mono">${esc(label)}</span></div>
+    <div class="nh"><span class="p1 by-${esc(actor)}" title="${esc(DOES[actor] ?? "")}"></span>
+      <span class="lab nk">${esc(c.label ?? kindOf(c.type ?? ""))}</span>
+      ${label ? `<span class="ns">${esc(label)}</span>` : ""}</div>
     <div class="nb"><p class="nt">${esc(c.title ?? c.id)}</p>
-      <p class="nc mono">${esc(c.type ?? "")}${c.summary && !c.tool ? `<br>${esc(c.summary)}` : ""}</p>${tool}${ports}</div>
+      <p class="nc">${summary}</p>${ports}</div>
   </div>`;
 }
 
+/** "out"/"done" mean nothing to a reader; on a loop they mean these. */
+const PORT_NAMES: Record<string, Record<string, string>> = {
+  "logic.each": { out: "each", done: "then" },
+};
+const portName = (type: string, port: string) => PORT_NAMES[type]?.[port] ?? port;
+
+const ACTORS: Record<string, string> = {
+  "trigger.ask": "user", "trigger.schedule": "user", "gate.approve": "user",
+  "logic.filter": "circuit", "logic.branch": "circuit", "logic.each": "circuit",
+};
+
+const DOES: Record<string, string> = {
+  circuit: "Circuit settles this one on its own",
+  claude: "Claude does this",
+  user: "this one is yours",
+};
+
+/** Mirrors registry.ts so a chip streaming in already says what it does. */
+const LABELS: Record<string, string> = {
+  "trigger.ask": "when", "trigger.schedule": "every", "trigger.watch": "watch",
+  "tool.call": "do",
+  "model.classify": "decide", "model.write": "write", "model.extract": "read",
+  "logic.filter": "only if", "logic.branch": "route", "logic.each": "for each",
+  "gate.approve": "ask you", "note.say": "report",
+};
 function kindOf(type: string) {
-  const head = (type ?? "").split(".")[0];
-  return ["trigger", "tool", "model", "logic", "gate", "note"].includes(head) ? head : "tool";
+  return LABELS[type] ?? (type ?? "").split(".")[0] ?? "step";
 }
 
 function renderBuilding(name: string) {
@@ -187,6 +248,7 @@ function renderBuilding(name: string) {
     position: s.position ?? { col: i, lane: 0 },
     kind: kindOf(s.type ?? ""),
     tool: (s as any).config?.tool ?? null,
+    actor: ACTORS[s.type ?? ""] ?? "claude",
     summary: (s as any).summary ?? "",
   }));
   const html = chips.map((c, i) => chipHtml(c, i)).join("");
@@ -229,8 +291,29 @@ function sizeCanvas(steps: Chip[]) {
   const maxCol = Math.max(0, ...steps.map((s) => s.position?.col ?? 0));
   const maxLane = Math.max(0, ...steps.map((s) => s.position?.lane ?? 0));
   const c = el("canvas")!;
-  c.style.minWidth = `${PAD_X * 2 + maxCol * COL_W + NODE_W}px`;
-  c.style.height = `${PAD_Y * 2 + maxLane * LANE_H + 168}px`;
+  const w = PAD_X * 2 + maxCol * COL_W + NODE_W;
+  const h = PAD_Y * 2 + maxLane * LANE_H + 168;
+  c.style.minWidth = `${w}px`;
+  c.style.height = `${h}px`;
+  applyFit(w, h);
+}
+
+/** "Fit" shrinks a wide board to the panel rather than making you scroll it. */
+function applyFit(w: number, h: number) {
+  const c = el("canvas") as HTMLElement | null;
+  const wrap = el("scroll") as HTMLElement | null;
+  if (!c || !wrap) return;
+  if (!fitted) {
+    c.style.transform = "";
+    c.style.transformOrigin = "";
+    wrap.style.height = "";
+    return;
+  }
+  const scale = Math.min(1, (wrap.clientWidth - 2) / w);
+  c.style.transformOrigin = "0 0";
+  c.style.transform = `scale(${scale})`;
+  wrap.style.height = `${Math.ceil(h * scale)}px`;
+  wrap.style.overflowX = "hidden";
 }
 
 /*
@@ -272,6 +355,12 @@ function elbowFull(x1: number, y1: number, xv: number, y2: number, x2: number) {
   return `M${x1} ${y1} L${xv - c} ${y1} L${xv} ${y1 + s * c} L${xv} ${y2 - s * c} L${xv + c} ${y2} L${x2} ${y2}`;
 }
 
+/** true while a run is still in flight — pulses only run then */
+function runInFlight() {
+  const st = board?.run?.status;
+  return st === "running" || st === "awaiting_approval";
+}
+
 function drawTraces(steps: Chip[]) {
   const svg = el("traces")!;
   const canvasEl = el("canvas")!;
@@ -294,7 +383,7 @@ function drawTraces(steps: Chip[]) {
       p.setAttribute("d", r.d);
       p.setAttribute("class", `trace${hot ? " hot" : ""}`);
       svg.appendChild(p);
-      if (hot && live()) {
+      if (hot && runInFlight()) {
         const pulse = document.createElementNS(NS, "path");
         pulse.setAttribute("d", r.d);
         pulse.setAttribute("class", "pulse");
@@ -317,7 +406,13 @@ function wire() {
   const wf = board?.workflow;
 
   el("btn-full")?.addEventListener("click", () => app.requestDisplayMode("fullscreen").catch(() => {}));
-  el("btn-fit")?.addEventListener("click", () => { if (board) render(); });
+  el("btn-fit")?.addEventListener("click", () => { fitted = !fitted; render(); });
+
+  // clicking the board itself clears the selection
+  el("canvas")?.addEventListener("pointerdown", (e) => {
+    if ((e.target as HTMLElement).closest(".node")) return;
+    if (selected) { selected = null; render(); }
+  });
 
   const nameEl = el("wfname");
   nameEl?.addEventListener("blur", () => {
@@ -359,6 +454,7 @@ function startDrag(ev: PointerEvent, node: HTMLElement) {
   document.querySelectorAll(".node.sel").forEach((n) => n.classList.remove("sel"));
   node.classList.add("sel");
 
+  const first = selected !== id;
   const startX = ev.clientX, startY = ev.clientY;
   const step = wf.steps.find((s) => s.id === id)!;
   const from = { ...step.position };
@@ -384,6 +480,8 @@ function startDrag(ev: PointerEvent, node: HTMLElement) {
     if (moved) {
       sizeCanvas(wf.steps);
       call("circuit_move", { workflowId: wf.id, stepId: id, col: step.position.col, lane: step.position.lane }, true);
+    } else if (first) {
+      render();   // show this step in the inspector
     }
   };
   node.addEventListener("pointermove", move);
