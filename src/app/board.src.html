@@ -1,0 +1,127 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Circuit board</title>
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wdth,wght@62..125,400..700&family=JetBrains+Mono:wght@400;500&display=swap">
+<style>
+:root{
+  --board:#EDEFEE; --grid:#D8DEDC; --chip:#FFFFFF; --chip-2:#F4F7F6; --chip-head:#EBEFEE;
+  --edge:#C7D0CE; --edge-hi:#AEB9B7; --trace:#AAB5B3; --pad:#B8892E;
+  --accent:#8F6717; --pulse:#C79A3F; --ink:#0F1618; --ink-2:#485557; --ink-3:#768385;
+  --ok:#2C7457; --fault:#AB362E; --wait:#57657A; --panel:#FFFFFF; --rule:#E2E7E6;
+}
+:root[data-theme="dark"]{
+  --board:#080B0C; --grid:#12191A; --chip:#141A1B; --chip-2:#1A2122; --chip-head:#1A2122;
+  --edge:#28312F; --edge-hi:#3B4644; --trace:#41534E; --pad:#C8973F;
+  --accent:#D2A24E; --pulse:#FFE3A3; --ink:#E8EEEB; --ink-2:#9CAAA6; --ink-3:#6B7A77;
+  --ok:#57AC8D; --fault:#DA5A4F; --wait:#8C93A8; --panel:#111718; --rule:#1E2626;
+}
+*{box-sizing:border-box}
+html,body{margin:0;background:var(--panel);color:var(--ink);
+  font-family:"Archivo","Helvetica Neue",Arial,sans-serif;-webkit-font-smoothing:antialiased}
+.mono,.mono *{font-family:"JetBrains Mono",ui-monospace,SFMono-Regular,Menlo,monospace}
+.lab{font-size:10px;letter-spacing:.14em;text-transform:uppercase;
+  font-variation-settings:"wdth" 88,"wght" 600;color:var(--ink-3)}
+
+.frame{border:1px solid var(--edge);border-radius:6px;overflow:hidden;background:var(--board)}
+.bar{display:flex;align-items:center;gap:12px;padding:9px 12px;border-bottom:1px solid var(--edge);
+  background:var(--panel);flex-wrap:wrap}
+.dot{width:6px;height:6px;border-radius:50%;background:var(--ink-3);flex:none}
+.dot.live{background:var(--ok);box-shadow:0 0 0 3px color-mix(in srgb,var(--ok) 18%,transparent)}
+.name{font-size:13px;font-variation-settings:"wght" 600;cursor:text}
+.name:focus{outline:1px solid var(--accent);outline-offset:2px;border-radius:2px}
+.sp{flex:1}
+button{font:inherit;font-size:11.5px;letter-spacing:.06em;text-transform:uppercase;
+  font-variation-settings:"wdth" 90,"wght" 600;background:var(--chip-2);color:var(--ink-2);
+  border:1px solid var(--edge);padding:5px 11px;border-radius:3px;cursor:pointer}
+button:hover{color:var(--ink);border-color:var(--edge-hi)}
+button:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+button.primary{background:var(--accent);border-color:var(--accent);color:var(--board)}
+button.ghost{background:transparent}
+
+.scroll{overflow-x:auto;overflow-y:hidden}
+.canvas{position:relative;min-height:200px;
+  background-image:radial-gradient(var(--grid) 1px,transparent 1px);
+  background-size:22px 22px;background-position:8px 8px}
+.canvas svg{position:absolute;inset:0;width:100%;height:100%;overflow:visible;pointer-events:none}
+.trace{fill:none;stroke:var(--trace);stroke-width:1.7;stroke-linejoin:miter}
+.trace.hot{stroke:var(--accent);stroke-width:1.9}
+.pulse{fill:none;stroke:var(--pulse);stroke-width:2.6;stroke-linecap:round;opacity:.95;
+  animation:flow 1.15s linear infinite}
+@keyframes flow{from{stroke-dashoffset:1}to{stroke-dashoffset:0}}
+.pad{fill:var(--board);stroke:var(--trace);stroke-width:1.6}
+.pad.hot{fill:var(--pad);stroke:var(--pad)}
+.silk{position:absolute;left:26px;bottom:12px;font-size:9.5px;letter-spacing:.16em;
+  text-transform:uppercase;color:var(--ink-3);opacity:.5;pointer-events:none}
+
+.node{position:absolute;width:180px;background:var(--chip);border:1px solid var(--edge);
+  border-radius:3px;clip-path:polygon(9px 0,100% 0,100% 100%,0 100%,0 9px);cursor:grab;
+  transition:opacity .28s ease,transform .28s cubic-bezier(.2,.8,.3,1),border-color .18s,box-shadow .18s;
+  opacity:0;transform:translateY(6px)}
+.node.in{opacity:1;transform:none}
+.node.sel{border-color:var(--accent)}
+.node.running{border-color:var(--accent);box-shadow:0 0 0 1px var(--accent),0 0 22px -6px var(--accent)}
+.node.waiting{animation:breathe 1.8s ease-in-out infinite}
+@keyframes breathe{0%,100%{box-shadow:0 0 0 1px var(--accent),0 0 18px -8px var(--accent)}
+  50%{box-shadow:0 0 0 1px var(--accent),0 0 30px -4px var(--accent)}}
+.node.done{border-color:color-mix(in srgb,var(--ok) 55%,var(--edge))}
+.node.held{border-color:var(--wait);border-style:dashed}
+.node.failed{border-color:var(--fault)}
+.node.skipped,.node.muted{opacity:.42}
+.node.dragging{cursor:grabbing;z-index:9}
+.nh{display:flex;align-items:center;gap:7px;padding:6px 8px 5px 12px;background:var(--chip-head);
+  border-bottom:1px solid var(--edge)}
+.p1{width:4px;height:4px;border-radius:50%;background:var(--ink-3);flex:none}
+.node.running .p1,.node.sel .p1{background:var(--accent)}
+.nk{flex:1}
+.ns{font-size:9px;letter-spacing:.06em;text-transform:uppercase;color:var(--ink-3);
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:86px;flex:none}
+.node.running .ns{color:var(--accent)} .node.done .ns{color:var(--ok)}
+.node.held .ns{color:var(--wait)} .node.failed .ns{color:var(--fault)}
+.nb{padding:9px 12px 11px}
+.nt{font-size:13.5px;line-height:1.25;font-variation-settings:"wght" 600;margin:0 0 5px}
+.nc{font-size:10.5px;line-height:1.5;color:var(--ink-3);margin:0;word-break:break-word}
+.tool{display:inline-flex;align-items:center;gap:5px;margin-top:7px;padding:2px 6px;border-radius:2px;
+  border:1px solid var(--edge);background:var(--chip-2);font-size:10px;color:var(--ink-2);max-width:100%}
+.tool b{font-weight:400;color:var(--ink-3);letter-spacing:.04em;text-transform:uppercase;font-size:9px}
+.tool span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.node.running .tool{border-color:var(--accent);color:var(--accent)}
+.no{display:flex;gap:4px;flex-wrap:wrap;margin-top:8px}
+.op{font-size:9.5px;padding:1px 5px;border-radius:2px;border:1px solid var(--edge);
+  color:var(--ink-3);background:var(--chip-2)}
+.op.lit{border-color:var(--accent);color:var(--accent)}
+
+.console{min-height:96px;border-top:1px solid var(--edge);background:var(--panel);display:flex}
+.rail{width:186px;flex:none;border-right:1px solid var(--edge);padding:11px 12px;
+  display:flex;flex-direction:column;gap:6px}
+.spark{width:7px;height:7px;background:var(--accent);border-radius:1px;flex:none;
+  animation:blink 1s steps(2) infinite}
+.spark.idle{background:var(--ink-3);animation:none}
+@keyframes blink{50%{opacity:.25}}
+.sub{font-size:10px;color:var(--ink-3)}
+pre.log{margin:0;flex:1;padding:12px 14px;overflow:hidden;font-size:11px;line-height:1.7;
+  color:var(--ink-2);white-space:pre}
+pre.log b{font-weight:400;color:var(--accent)} pre.log i{font-style:normal;color:var(--ink-3)}
+.caret{display:inline-block;width:6px;height:11px;background:var(--accent);vertical-align:-1px;
+  animation:blink .9s steps(2) infinite}
+
+.gate{border-top:1px solid var(--edge);background:var(--panel);padding:12px 14px}
+.gate .q{font-size:11px;color:var(--ink-3);margin:0 0 8px}
+.gate h4{margin:0 0 8px;font-size:12.5px;font-variation-settings:"wght" 600}
+.gate textarea{width:100%;min-height:88px;resize:vertical;background:var(--chip);color:var(--ink);
+  border:1px solid var(--edge);border-radius:3px;padding:9px 11px;font-size:12.5px;line-height:1.55;
+  font-family:"Archivo",sans-serif}
+.gate textarea:focus{outline:none;border-color:var(--accent)}
+.gate .row{display:flex;gap:8px;margin-top:9px;align-items:center}
+.empty{padding:44px 16px;text-align:center;color:var(--ink-3);font-size:13px}
+@media (prefers-reduced-motion:reduce){.node{transition:none}.spark,.caret{animation:none}}
+</style>
+</head>
+<body>
+<div id="root"><div class="empty">Waiting for the board…</div></div>
+<script>/*__BUNDLE__*/</script>
+</body>
+</html>

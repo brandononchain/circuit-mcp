@@ -1,0 +1,11 @@
+node_modules
+dist
+.vercel
+.env
+src/app/board.html
+src/app/board.generated.ts
+scripts/harness.html
+scripts/fixtures.json
+*.png
+h-*.png
+shot*.mjs

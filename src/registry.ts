@@ -1,0 +1,288 @@
+import { z } from "zod";
+import type { Step } from "./graph.js";
+
+/**
+ * Circuit owns no integrations. Every step is one of a small set of kinds that
+ * either Circuit resolves itself (routing, filtering, looping) or hands to
+ * Claude as a directive — a connector tool to call, a judgement to make, or a
+ * question to put to the user.
+ */
+export type Kind = "trigger" | "tool" | "model" | "logic" | "gate" | "note";
+
+export type StepDef = {
+  type: string;
+  kind: Kind;
+  title: string;
+  blurb: string;
+  /** who does the work */
+  actor: "circuit" | "claude" | "user";
+  ports: string[] | "dynamic";
+  config: z.ZodTypeAny;
+  summary: (config: any, step?: Step) => string;
+};
+
+/* ------------------------------------------------------------- conditions */
+
+const Cond = z.object({
+  field: z.string().describe("Dot path into run data: 'trigger.subject', 'steps.classify.label', 'item.from'."),
+  op: z.enum(["equals", "contains", "matches", "exists", "missing", "gt", "lt"]),
+  value: z.string().optional(),
+});
+export type Cond = z.infer<typeof Cond>;
+
+export const MatchSchema = z.object({
+  all: z.array(Cond).default([]).describe("Every condition must hold."),
+  any: z.array(Cond).default([]).describe("At least one must hold."),
+});
+
+export function pick(data: any, path: string): any {
+  return path.split(".").reduce((a, k) => (a == null ? a : a[k]), data);
+}
+
+export function test(c: Cond, data: any): boolean {
+  const v = pick(data, c.field);
+  const s = v == null ? "" : String(v);
+  switch (c.op) {
+    case "exists": return v != null && s !== "";
+    case "missing": return v == null || s === "";
+    case "equals": return s.toLowerCase() === String(c.value ?? "").toLowerCase();
+    case "contains": return s.toLowerCase().includes(String(c.value ?? "").toLowerCase());
+    case "matches": try { return new RegExp(c.value ?? "", "i").test(s); } catch { return false; }
+    case "gt": return Number(v) > Number(c.value);
+    case "lt": return Number(v) < Number(c.value);
+  }
+}
+export function matches(cfg: z.infer<typeof MatchSchema>, data: any) {
+  const all = (cfg.all ?? []).every((c) => test(c, data));
+  const any = (cfg.any ?? []).length === 0 || (cfg.any ?? []).some((c) => test(c, data));
+  return all && any;
+}
+function describeMatch(c: any): string {
+  const parts = [...(c?.all ?? []), ...(c?.any ?? [])]
+    .map((x: Cond) => `${x.field.split(".").pop()} ${x.op}${x.value ? " " + x.value : ""}`);
+  if (!parts.length) return "no conditions";
+  return parts.slice(0, 2).join(" · ") + (parts.length > 2 ? ` +${parts.length - 2}` : "");
+}
+
+/* ------------------------------------------------------------------ steps */
+
+const ToolCall = z.object({
+  tool: z.string().describe(
+    "Exact name of a tool from one of the user's own connectors, as it appears in your tool list " +
+    "(e.g. 'Gmail:search_threads'). Circuit never calls it — you do."),
+  arguments: z.record(z.any()).default({}).describe(
+    "Arguments for that tool. Use {{trigger.x}}, {{steps.<id>.y}} or {{item.z}} anywhere in a string " +
+    "and Circuit substitutes the live value before handing the call back to you."),
+});
+
+export const STEPS: StepDef[] = [
+  {
+    type: "trigger.ask", kind: "trigger", actor: "user",
+    title: "When I ask",
+    blurb: "The workflow runs when the user asks for it in the conversation. The default.",
+    ports: ["out"], config: z.object({}),
+    summary: () => "on request",
+  },
+  {
+    type: "trigger.schedule", kind: "trigger", actor: "user",
+    title: "On a schedule",
+    blurb:
+      "Runs on a schedule. Circuit stores the schedule; you set it up with the user's scheduled tasks " +
+      "so a future session calls circuit_run.",
+    ports: ["out"],
+    config: z.object({
+      cron: z.string().describe("5 field cron, UTC."),
+      note: z.string().default("").describe("Plain English version, for the chip."),
+    }),
+    summary: (c) => c.note || c.cron || "unscheduled",
+  },
+  {
+    type: "trigger.watch", kind: "trigger", actor: "claude",
+    title: "When something new shows up",
+    blurb:
+      "Runs a connector tool to look for new items, and starts one pass per item found. " +
+      "Pair it with logic.each when the tool returns a list.",
+    ports: ["out"],
+    config: ToolCall,
+    summary: (c) => c.tool || "no tool bound",
+  },
+
+  {
+    type: "tool.call", kind: "tool", actor: "claude",
+    title: "Use a connector",
+    blurb:
+      "The workhorse. Names a tool from the user's own connectors and the arguments to call it with. " +
+      "Circuit resolves the templates and hands you the call; you make it and report the result back.",
+    ports: ["out"],
+    config: ToolCall,
+    summary: (c) => c.tool || "no tool bound",
+  },
+
+  {
+    type: "model.classify", kind: "model", actor: "claude",
+    title: "Decide which kind it is",
+    blurb: "You read the input and pick one label. The label becomes the output port, so wires fan out from it.",
+    ports: "dynamic",
+    config: z.object({
+      labels: z.array(z.string()).min(2).describe("The buckets. Each becomes an output port."),
+      input: z.string().default("trigger").describe("Dot path to what should be read."),
+      instructions: z.string().default("").describe("How to decide. Say what tips a borderline case."),
+    }),
+    summary: (c) => (c.labels ?? []).join(" | ") || "no labels",
+  },
+  {
+    type: "model.write", kind: "model", actor: "claude",
+    title: "Write something",
+    blurb: "You draft the text. Nothing is sent here — a later tool.call step does that.",
+    ports: ["out"],
+    config: z.object({
+      instructions: z.string().describe("What to write, and what it must or must not say."),
+      voice: z.string().default("").describe("How it should sound. Quote the user's own words if they gave you any."),
+      context: z.array(z.string()).default(["trigger"]).describe("Dot paths to read before writing."),
+      maxWords: z.number().default(160),
+    }),
+    summary: (c) => [c.voice && `voice: ${c.voice}`, `≤${c.maxWords ?? 160} words`].filter(Boolean).join(" · "),
+  },
+  {
+    type: "model.extract", kind: "model", actor: "claude",
+    title: "Pull out the details",
+    blurb: "You read the input and return the named fields as structured data.",
+    ports: ["out"],
+    config: z.object({
+      fields: z.array(z.object({ name: z.string(), description: z.string() })).min(1),
+      input: z.string().default("trigger"),
+    }),
+    summary: (c) => (c.fields ?? []).map((f: any) => f.name).join(", ") || "no fields",
+  },
+
+  {
+    type: "logic.filter", kind: "logic", actor: "circuit",
+    title: "Continue only if",
+    blurb: "Circuit checks the conditions itself and stops this path when they do not hold.",
+    ports: ["out"],
+    config: MatchSchema,
+    summary: (c) => describeMatch(c),
+  },
+  {
+    type: "logic.branch", kind: "logic", actor: "circuit",
+    title: "Branch on a value",
+    blurb: "Circuit sends the run down a named wire based on a value it already has.",
+    ports: "dynamic",
+    config: z.object({
+      field: z.string(),
+      cases: z.array(z.object({ equals: z.string(), port: z.string() })).min(1),
+      fallback: z.string().default("else"),
+    }),
+    summary: (c) => `${c.field} → ${(c.cases ?? []).map((x: any) => x.port).join(" | ")}`,
+  },
+  {
+    type: "logic.each", kind: "logic", actor: "circuit",
+    title: "For each",
+    blurb:
+      "Runs everything downstream once per item in a list. Inside the loop, {{item.…}} is the current item. " +
+      "Wire the 'done' port to whatever should happen after the last one.",
+    ports: ["out", "done"],
+    config: z.object({
+      list: z.string().describe("Dot path to the array, e.g. 'steps.search.threads'."),
+      limit: z.number().default(10).describe("Stop after this many, so a big inbox cannot run away."),
+    }),
+    summary: (c) => `${c.list ?? "?"} · max ${c.limit ?? 10}`,
+  },
+
+  {
+    type: "gate.approve", kind: "gate", actor: "user",
+    title: "Hold for my approval",
+    blurb:
+      "Parks the run and shows the user what is about to happen, on the board, with an editable draft. " +
+      "Nothing downstream runs until they answer.",
+    ports: ["out"],
+    config: z.object({
+      preview: z.string().default("").describe("Dot path to what the user should look at, e.g. 'steps.draft.text'."),
+      question: z.string().default("Send this?"),
+    }),
+    summary: (c) => c.question || "waiting on you",
+  },
+  {
+    type: "note.say", kind: "note", actor: "claude",
+    title: "Tell me what happened",
+    blurb: "You report back in the conversation. Good as the last step of a run.",
+    ports: ["out"],
+    config: z.object({
+      template: z.string().describe("What to say. Templates resolve, e.g. 'Replied to {{item.from}}.'"),
+    }),
+    summary: (c) => (c.template ?? "").slice(0, 40),
+  },
+];
+
+export const BY_TYPE = new Map(STEPS.map((s) => [s.type, s]));
+
+export function summarise(step: Step): string {
+  const def = BY_TYPE.get(step.type);
+  if (!def) return step.type;
+  const parsed = def.config.safeParse(step.config ?? {});
+  try { return def.summary(parsed.success ? parsed.data : step.config ?? {}, step); }
+  catch { return step.type; }
+}
+
+export function portsOf(step: Step): string[] {
+  const def = BY_TYPE.get(step.type);
+  if (!def) return ["out"];
+  if (def.ports !== "dynamic") return def.ports;
+  if (step.type === "model.classify") return (step.config?.labels as string[]) ?? ["out"];
+  if (step.type === "logic.branch") {
+    const cs = (step.config?.cases as any[]) ?? [];
+    return [...cs.map((c) => c.port), step.config?.fallback ?? "else"];
+  }
+  return ["out"];
+}
+
+/** The tool referenced by a step, if any — used to show the connector on the chip. */
+export function toolOf(step: Step): string | null {
+  const t = step.config?.tool;
+  return typeof t === "string" && t ? t : null;
+}
+
+export function catalog() {
+  return STEPS.map((s) => ({
+    type: s.type, kind: s.kind, title: s.title, blurb: s.blurb,
+    doneBy: s.actor,
+    ports: s.ports === "dynamic" ? "dynamic — see blurb" : s.ports,
+    config: sketch(s.config),
+  }));
+}
+
+/** A compact shape of a zod object — cheaper to read than full JSON Schema. */
+function sketch(schema: z.ZodTypeAny): Record<string, string> {
+  const out: Record<string, string> = {};
+  const def: any = (schema as any)._def;
+  const shape = def?.shape?.() ?? def?.innerType?._def?.shape?.();
+  if (!shape) return {};
+  for (const [k, v] of Object.entries<any>(shape)) {
+    const d = v._def?.description ?? v._def?.innerType?._def?.description ?? "";
+    const t = v._def?.typeName?.replace("Zod", "").toLowerCase() ?? "any";
+    const dv = v._def?.defaultValue ? JSON.stringify(v._def.defaultValue()) : undefined;
+    out[k] = [t, dv !== undefined ? `= ${dv}` : "", d].filter(Boolean).join(" ").trim();
+  }
+  return out;
+}
+
+/* ---------------------------------------------------------------- templates */
+
+/** Replace {{path}} anywhere inside a value, using the run's data. */
+export function resolve<T>(value: T, data: any): T {
+  if (typeof value === "string") {
+    const whole = value.match(/^\{\{\s*([^}]+?)\s*\}\}$/);
+    if (whole) return pick(data, whole[1]) as T;          // keep the real type
+    return value.replace(/\{\{\s*([^}]+?)\s*\}\}/g, (_, p) => {
+      const v = pick(data, p.trim());
+      return v == null ? "" : typeof v === "string" ? v : JSON.stringify(v);
+    }) as T;
+  }
+  if (Array.isArray(value)) return value.map((v) => resolve(v, data)) as T;
+  if (value && typeof value === "object") {
+    const out: any = {};
+    for (const [k, v] of Object.entries(value as any)) out[k] = resolve(v, data);
+    return out;
+  }
+  return value;
+}
