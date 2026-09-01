@@ -91,6 +91,31 @@ Suggestions come from bigram similarity weighted toward the connector: a near-mi
 
 Binding is optional. Without it Circuit says plainly that it could not check, and gets out of the way.
 
+## Every workflow has a second path
+
+A step fails. The connector 403s, the record isn't there, the API is having a
+day. Circuit makes that a designed outcome rather than a dead end — each step
+carries its own policy:
+
+| `onError.do` | What happens |
+| --- | --- |
+| `stop` *(default)* | The run halts here and keeps everything it had. Nothing after it ran. |
+| `skip` | This path ends; the rest of the run — the next loop item, say — carries on. |
+| `retry` | Circuit hands Claude the same directive again, up to `attempts` times. |
+| `route` | The run leaves by the **error** port, so the board can show a fallback. |
+
+<img src="docs/board-failed.png" alt="A run stopped on a failed step" width="100%">
+
+A stopped run is not a lost one. It keeps its data, its queue, and its place, so
+`circuit_resume` hands out the same directive again once you've fixed the cause —
+or steps over it with `skip: true`. That distinction matters: everything before
+the failure already happened, and re-running the whole workflow would repeat
+every side effect it had.
+
+The corresponding instruction to Claude is blunt, because this only works if it's
+honest: **report the failure, never substitute a plausible result.** A made-up
+success is the one thing that defeats the entire mechanism.
+
 ---
 
 ## Quick start
@@ -184,7 +209,8 @@ Thirteen tools, one capability each. Three are invisible to the model.
 | `circuit_patch` | model + app | Edits an existing board without discarding your layout. |
 | `circuit_open` · `circuit_list` | model | Reads. |
 | `circuit_run` | model + app | Starts a run, returns the first directive. |
-| `circuit_step` | model + app | Reports a result, returns the next directive. |
+| `circuit_step` | model + app | Reports a result — or an `error` — and returns the next directive. |
+| `circuit_resume` | app + model | Picks a failed run back up, retrying or skipping the step that broke. |
 | `circuit_runs` | model + app | History. |
 | `circuit_arm` · `circuit_disarm` | model + app | Marks a workflow live, and tells Claude how to schedule it. |
 | `circuit_answer` | app + model | Approve or reject a held gate, with edits. |
@@ -267,7 +293,7 @@ Hand-rolling a protocol is only defensible if you verify it against the real thi
 ```bash
 npm run dev        # server on :8787, rebuilds the app on change
 npm run harness    # builds the app + a local host with real fixtures
-open scripts/harness.html      # ?scene=build | run | held | broken   &theme=light
+open scripts/harness.html      # ?scene=build | run | held | broken | failed   &theme=light
 npm run typecheck
 ```
 
@@ -313,12 +339,15 @@ There is deliberately no third row. Circuit stores workflows and run history; it
 ## Roadmap
 
 - [x] Connector binding, so a mistyped tool is a design-time error
-- [ ] Failure handling: an `error` port, per-step retry, and a resumable run
+- [x] Failure policies, an `error` port, and a resumable run
 - [ ] A test mode that actually withholds writes rather than just labelling the run
 - [ ] Wire editing on the canvas — drag from a port to a chip
 - [ ] Run replay: scrub a past run and watch the payload move
 - [ ] `logic.parallel`, for fan-out that does not need ordering
-- [ ] A workflow export/import format, so boards are shareable outside Claude
+- [ ] Workflow inputs, and an export format so boards are shareable
+
+The reasoning behind the order, and what Circuit deliberately will not do, is in
+[ROADMAP.md](ROADMAP.md).
 
 ## Contributing
 

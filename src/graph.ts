@@ -11,6 +11,14 @@ export const StepSchema = z.object({
     to: z.string().describe("id of the step it goes to."),
   })).default([]).describe("Outgoing wires."),
   enabled: z.boolean().default(true),
+  onError: z.object({
+    do: z.enum(["stop", "skip", "retry", "route"]).default("stop").describe(
+      "stop: the whole run fails here. skip: this path ends, the rest of the run (the next loop " +
+      "item, say) carries on. retry: Circuit hands you the same directive again. route: the run " +
+      "leaves by the error port, so you can wire a fallback."),
+    attempts: z.number().int().min(1).max(5).default(2).describe("For retry: how many tries in total."),
+    port: z.string().default("error").describe("For route: which wire to take."),
+  }).optional().describe("What should happen when this step fails. Defaults to stopping the run."),
   position: z.object({ col: z.number().int(), lane: z.number().int() }).optional()
     .describe("Board placement. Omit and Circuit lays it out."),
 });
@@ -38,7 +46,7 @@ export type Workflow = {
 };
 
 export type StepRunState =
-  | "idle" | "running" | "done" | "skipped" | "held" | "failed";
+  | "idle" | "running" | "done" | "skipped" | "held" | "failed" | "retrying";
 
 export type StepTrace = {
   stepId: string;
@@ -47,6 +55,7 @@ export type StepTrace = {
   summary?: string;
   output?: unknown;
   error?: string;
+  attempts?: number;
   ms?: number;
 };
 
@@ -70,6 +79,10 @@ export type Run = {
   loops: LoopFrame[];
   /** the step Claude is currently working on, if any */
   awaiting: { stepId: string; act: string } | null;
+  /** how many times each step has been handed out, for retry limits */
+  attempts?: Record<string, number>;
+  /** the step a failed run stopped on, so it can be picked up again */
+  failedAt?: string | null;
   trace: StepTrace[];
 };
 

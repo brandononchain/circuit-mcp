@@ -7,7 +7,7 @@ import { StepSchema, findEntry, layout, type Run, type Workflow } from "./graph.
 import { BY_TYPE, catalog } from "./registry.js";
 import { describe, toBoard } from "./board.js";
 import { getStore } from "./store/index.js";
-import { advance, newRun, report, type Directive } from "./engine/run.js";
+import { advance, fail, newRun, report, resume, type Directive } from "./engine/run.js";
 import { checkTools, describeMissing, requiredTools, type ToolBinding } from "./tools.js";
 
 export const APP_URI = "ui://circuit/board.html";
@@ -40,6 +40,9 @@ How to use it:
     result. Repeat until the directive is {"act":"done"}. Do not batch, skip, or reorder steps, and do
     not run a tool the directive did not name.
  4. On {"act":"ask"}, stop and let the user answer on the board.
+ 5. If a directive does not work — the tool errors, the connector refuses, the data is not there —
+    report it with circuit_step's 'error' field. Do not substitute a plausible result: the step's own
+    error policy decides what happens next, and it can only do that if you say what really happened.
 
 Templates like {{trigger.subject}}, {{steps.draft.text}} and {{item.from}} are resolved by Circuit
 before a directive reaches you — never fill them in yourself.`;
@@ -47,7 +50,7 @@ before a directive reaches you — never fill them in yourself.`;
 export function buildServer(workspace: string): McpServer {
   const store = getStore();
   const server = new McpServer(
-    { name: "circuit", version: "0.3.0", title: "Circuit" },
+    { name: "circuit", version: "0.3.1", title: "Circuit" },
     { instructions: INSTRUCTIONS },
   );
 
@@ -318,15 +321,43 @@ export function buildServer(workspace: string): McpServer {
     inputSchema: {
       runId: z.string(),
       stepId: z.string().describe("The stepId from the directive you just carried out."),
-      result: z.any().describe("What came back. Verbatim — do not summarise it."),
+      result: z.any().optional().describe("What came back. Verbatim — do not summarise it."),
+      error: z.string().optional().describe(
+        "Set this instead of `result` when the step did not work — the tool errored, the connector " +
+        "refused, the data was not there. Say what actually went wrong. Never paper over a failure " +
+        "with a made-up result; what happens next is the step's own error policy, and Circuit needs " +
+        "the truth to apply it."),
     },
     _meta: ui(),
-  }, async ({ runId, stepId, result }) => {
+  }, async ({ runId, stepId, result, error }) => {
     const run = await store.getRun(workspace, runId);
     if (!run) return oops(`No run ${runId}.`);
     const wf = await load(run.workflowId);
     if (!wf) return oops(`Workflow ${run.workflowId} is gone.`);
-    const d = report(wf, run, stepId, result);
+    const d = error ? fail(wf, run, stepId, error) : report(wf, run, stepId, result ?? {});
+    await store.putRun(run);
+    return withDirective(wf, run, d);
+  });
+
+  server.registerTool("circuit_resume", {
+    title: "Pick up a failed run",
+    description:
+      "A run that stopped on a failure keeps everything it had. Call this once the cause is fixed and " +
+      "Circuit hands you the same directive again, or pass skip to step over that one and carry on. " +
+      "Use it rather than starting a fresh run — the earlier steps already happened, and running them " +
+      "twice would repeat their side effects.",
+    inputSchema: {
+      runId: z.string(),
+      skip: z.boolean().default(false).describe("Step over the failed step instead of trying it again."),
+    },
+    _meta: ui(["app", "model"]),
+  }, async ({ runId, skip }) => {
+    const run = await store.getRun(workspace, runId);
+    if (!run) return oops(`No run ${runId}.`);
+    if (!run.failedAt) return oops(`Run ${runId} is ${run.status} — there is nothing to pick up.`);
+    const wf = await load(run.workflowId);
+    if (!wf) return oops(`Workflow ${run.workflowId} is gone.`);
+    const d = resume(wf, run, skip);
     await store.putRun(run);
     return withDirective(wf, run, d);
   });

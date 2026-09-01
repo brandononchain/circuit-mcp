@@ -5,17 +5,21 @@ type Wire = { port: string; to: string };
 type Chip = {
   id: string; type: string; kind: string; label?: string; actor?: string;
   title: string; summary: string; config?: Record<string, unknown>;
-  tool?: string | null; toolKnown?: boolean | null; ports: string[]; next: Wire[]; enabled: boolean;
+  tool?: string | null; toolKnown?: boolean | null; onError?: { do: string; attempts?: number; port?: string };
+  ports: string[]; next: Wire[]; enabled: boolean;
   position: { col: number; lane: number };
 };
 type Directive = {
   act: string; stepId?: string; title?: string; tool?: string; question?: string;
   preview?: string; text?: string; reason?: string; summary?: string;
 };
-type Trace = { stepId: string; state: string; port?: string; summary?: string; error?: string };
+type Trace = { stepId: string; state: string; port?: string; summary?: string; error?: string; attempts?: number };
 type Board = {
   workflow: { id: string; name: string; description: string; status: string; entry: string; steps: Chip[] };
-  run: { id: string; status: string; mode: string; trace: Trace[]; awaiting: { stepId: string; act: string } | null } | null;
+  run: {
+    id: string; status: string; mode: string; trace: Trace[];
+    awaiting: { stepId: string; act: string } | null; failedAt?: string | null;
+  } | null;
   storage?: string;
   phase?: string;
   tools?: { bound: boolean; missing: { stepId: string; tool: string; suggestion?: string }[]; present: string[] };
@@ -83,7 +87,12 @@ app.h.ontoolresult = (p: any) => {
     if (d && d.act !== "done" && d.act !== "blocked") {
       logLines.push(`${pad("→ next", 14)}${pad(d.act, 10)}${d.tool ?? d.title ?? ""}`);
     }
-    if (d?.act === "blocked") logLines.push(`${pad("✕", 14)}${d.reason ?? "blocked"}`);
+    // a blocked run already has the panel below; repeating the reason here just
+    // runs off the edge of the console
+    if (d?.act === "blocked" && !run.failedAt) {
+      logLines.push(`${pad("✕", 14)}${first(d.reason ?? "blocked")}`);
+    }
+    if (d?.act === "done") logLines.push(`${pad("✓", 14)}${d.summary ?? "done"}`);
   } else {
     consoleState = { label: wf.name, sub: `${wf.steps.length} steps · ${wf.status}`, busy: false };
     const tools = board.tools;
@@ -104,6 +113,11 @@ app.h.ontoolresult = (p: any) => {
 };
 
 /* ---------------------------------------------------------------- helpers */
+/** first sentence, so a long reason does not run off the console */
+const first = (s: string) => {
+  const cut = s.split(/(?<=\.)\s/)[0];
+  return cut.length > 96 ? cut.slice(0, 95) + "\u2026" : cut;
+};
 const pad = (s: string, n: number) => (s + " ".repeat(n)).slice(0, Math.max(n, s.length + 1));
 const esc = (s: string) => String(s ?? "").replace(/[&<>"]/g, (c) =>
   ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]!));
@@ -125,14 +139,15 @@ function stateOf(id: string): string {
 }
 const STATE_WORD: Record<string, string> = {
   running: "running", done: "ran", skipped: "not taken",
-  held: "waiting on you", failed: "failed", idle: "",
+  held: "waiting on you", failed: "failed", retrying: "trying again", idle: "",
 };
 
 /** Nothing at all before a run — an "IDLE" badge on every chip is just noise. */
 function labelOf(id: string): string {
   const t = board?.run?.trace.find((x) => x.stepId === id);
   if (!t || t.state === "idle") return "";
-  const s = t.summary || STATE_WORD[t.state] || t.state;
+  const s = t.state === "failed" ? (t.summary || "failed")
+    : t.summary || STATE_WORD[t.state] || t.state;
   return s.length > 20 ? s.slice(0, 19) + "\u2026" : s;
 }
 
@@ -188,7 +203,9 @@ function inspectorHtml() {
     ${c.tool ? `<dt>connector</dt><dd><code>${esc(c.tool)}</code>${
       c.toolKnown === false ? ' \u00b7 <span class="warn">not in your tool list</span>'
       : c.toolKnown === true ? ' \u00b7 checked' : ""}</dd>` : ""}
-    ${t && t.state !== "idle" ? `<dt>last run</dt><dd>${esc(t.summary || t.error || t.state)}</dd>` : ""}
+    ${c.onError ? `<dt>on failure</dt><dd>${esc(FAILURE[c.onError.do] ?? c.onError.do)}</dd>` : ""}
+    ${t && t.state !== "idle" ? `<dt>last run</dt><dd>${esc(t.summary || t.state)}${
+      t.error ? `<pre class="warn">${esc(t.error)}</pre>` : ""}</dd>` : ""}
     <dt>settings</dt><dd><pre>${esc(cfg === "{}" ? "nothing to configure" : cfg)}</pre></dd>
   </dl></div>`;
 }
@@ -240,6 +257,11 @@ const ACTORS: Record<string, string> = {
   "logic.filter": "circuit", "logic.branch": "circuit", "logic.each": "circuit",
 };
 
+const FAILURE: Record<string, string> = {
+  stop: "stops the whole run", skip: "ends this path, the rest carries on",
+  retry: "hands Claude the same directive again", route: "leaves by the error port",
+};
+
 const DOES: Record<string, string> = {
   circuit: "Circuit settles this one on its own",
   claude: "Claude does this",
@@ -281,7 +303,8 @@ function render() {
   const wf = board.workflow;
   const chips = wf.steps.map((c, i) => chipHtml(c, i, stateOf(c.id), labelOf(c.id))).join("");
   const d = board.directive;
-  const gate = d?.act === "ask" ? gateHtml(d) : "";
+  const gate = d?.act === "ask" ? gateHtml(d)
+    : board.run?.failedAt ? troubleHtml(board.run.failedAt) : "";
   document.getElementById("root")!.innerHTML = shell(chips, gate);
   sizeCanvas(wf.steps);
   drawTraces(wf.steps);
@@ -299,6 +322,21 @@ function gateHtml(d: Directive) {
       <button class="primary" id="gate-ok">${hasDraft ? "Approve &amp; continue" : "Approve"}</button>
       <button id="gate-no">Reject</button>
       <span class="sub mono">${hasDraft ? "Edits here are what actually goes out." : "The run continues from this step."}</span>
+    </div>
+  </div>`;
+}
+
+/** A failed run is a fork in the road, so give it the two roads. */
+function troubleHtml(stepId: string) {
+  const t = board?.run?.trace.find((x) => x.stepId === stepId);
+  const step = board?.workflow.steps.find((x) => x.id === stepId);
+  return `<div class="gate trouble">
+    <h4>${esc(step?.title ?? stepId)} didn\u2019t work</h4>
+    <p class="q">${esc(t?.error ?? "No detail was reported.")}</p>
+    <div class="row">
+      <button class="primary" id="fix-retry">Try it again</button>
+      <button id="fix-skip">Skip this step</button>
+      <span class="sub">Everything before this already ran \u2014 picking up is not the same as starting over.</span>
     </div>
   </div>`;
 }
@@ -449,6 +487,16 @@ function wire() {
   el("gate-no")?.addEventListener("click", () => {
     if (!board?.run) return;
     call("circuit_answer", { runId: board.run.id, decision: "reject" });
+  });
+
+  el("fix-retry")?.addEventListener("click", () => {
+    if (!board?.run) return;
+    consoleState = { label: board.run.id, sub: "trying again", busy: true }; render();
+    call("circuit_resume", { runId: board.run.id, skip: false });
+  });
+  el("fix-skip")?.addEventListener("click", () => {
+    if (!board?.run) return;
+    call("circuit_resume", { runId: board.run.id, skip: true });
   });
 
   document.querySelectorAll<HTMLElement>(".node").forEach((n) => {

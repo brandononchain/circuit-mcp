@@ -257,6 +257,12 @@ export function summarise(step: Step): string {
 }
 
 export function portsOf(step: Step): string[] {
+  const base = basePorts(step);
+  const err = step.onError?.do === "route" ? (step.onError.port || "error") : null;
+  return err && !base.includes(err) ? [...base, err] : base;
+}
+
+function basePorts(step: Step): string[] {
   const def = BY_TYPE.get(step.type);
   if (!def) return ["out"];
   if (def.ports !== "dynamic") return def.ports;

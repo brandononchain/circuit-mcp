@@ -77,8 +77,35 @@ const broken = await c.callTool({ name: "circuit_design", arguments: {
   ],
 } });
 
+/* a run stopped on a failure, for the "failed" scene */
+const fw = await c.callTool({ name: "circuit_design", arguments: {
+  name: "Invoice chaser", description: "Nudges the overdue ones once a week.",
+  steps: [
+    { id: "monday", type: "trigger.schedule", title: "Every Monday morning",
+      config: { cron: "0 14 * * 1", note: "Mondays at 8am" }, next: [{ port: "out", to: "find" }] },
+    { id: "find", type: "tool.call", title: "Find the overdue ones",
+      config: { tool: "Gmail:search_threads", arguments: { q: "label:invoices older_than:14d" } },
+      next: [{ port: "out", to: "nudge" }] },
+    { id: "nudge", type: "model.write", title: "Write a gentle nudge",
+      config: { instructions: "Politely ask where the invoice stands.", voice: "brandononchain", maxWords: 90 },
+      next: [{ port: "out", to: "send" }] },
+    { id: "send", type: "tool.call", title: "Send the nudge",
+      config: { tool: "Gmail:reply", arguments: { thread_id: "{{steps.find.threads.0.id}}", body: "{{steps.nudge.text}}" } },
+      next: [{ port: "out", to: "log" }] },
+    { id: "log", type: "note.say", title: "Tell me who got chased",
+      config: { template: "Chased the overdue invoices." }, next: [] },
+  ],
+} });
+const fwId = fw.structuredContent.workflow.id;
+let fr = await c.callTool({ name: "circuit_run", arguments: { workflowId: fwId, trigger: {} } });
+const frid = fr.structuredContent.run.id;
+await c.callTool({ name: "circuit_step", arguments: { runId: frid, stepId: "find", result: { threads: [{ id: "t9", from: "ap@lumen.co" }] } } });
+await c.callTool({ name: "circuit_step", arguments: { runId: frid, stepId: "nudge", result: { text: "Hi — just checking where invoice 1043 stands. Anything you need from me?" } } });
+const failed = await c.callTool({ name: "circuit_step", arguments: { runId: frid, stepId: "send",
+  error: "Gmail:reply returned 403 — the connector is not authorized to send on this account" } });
+
 writeFileSync("scripts/fixtures.json", JSON.stringify({
-  design, held: held ?? res, run: res, afterMove: design, broken,
+  design, held: held ?? res, run: res, afterMove: design, broken, failed,
 }, null, 1));
 console.log("fixtures written · workflow", wfId, "· final", JSON.stringify(d));
 await c.close();

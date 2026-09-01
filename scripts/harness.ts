@@ -49,6 +49,9 @@ bridge.oninitialized = async () => {
   } else if (scene === "run") {
     bridge.sendToolInput({ arguments: {} });
     bridge.sendToolResult(FIXTURES.run);
+  } else if (scene === "failed") {
+    bridge.sendToolInput({ arguments: {} });
+    bridge.sendToolResult(FIXTURES.failed);
   } else if (scene === "broken") {
     bridge.sendToolInput({ arguments: {} });
     bridge.sendToolResult(FIXTURES.broken);

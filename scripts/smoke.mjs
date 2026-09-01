@@ -116,5 +116,61 @@ console.log("run accepted:", !nowRuns.isError, "|", JSON.stringify(nowRuns.struc
 const wrongStep = await client.callTool({ name: "circuit_step", arguments: { runId, stepId: "send", result: {} } });
 console.log("out-of-order guard:", JSON.stringify(wrongStep.structuredContent.directive));
 
+/* ---- failure handling: retry, route, stop + resume ---- */
+console.log("\n--- failure policies ---");
+const fw = await client.callTool({ name: "circuit_design", arguments: {
+  name: "Failure drill", description: "Exercises every error policy.",
+  steps: [
+    { id: "go", type: "trigger.ask", title: "When I ask", config: {}, next: [{ port: "out", to: "flaky" }] },
+    { id: "flaky", type: "tool.call", title: "Flaky call",
+      config: { tool: "Gmail:search_threads", arguments: {} },
+      onError: { do: "retry", attempts: 3 }, next: [{ port: "out", to: "risky" }] },
+    { id: "risky", type: "tool.call", title: "Risky call",
+      config: { tool: "Gmail:label_thread", arguments: {} },
+      onError: { do: "route", port: "error" },
+      next: [{ port: "out", to: "done" }, { port: "error", to: "fallback" }] },
+    { id: "fallback", type: "tool.call", title: "Fall back to a label",
+      config: { tool: "Gmail:label_thread", arguments: { label: "needs-human" } }, next: [{ port: "out", to: "done" }] },
+    { id: "done", type: "tool.call", title: "Final call",
+      config: { tool: "Gmail:reply", arguments: {} }, next: [] },
+  ],
+} });
+const fwId = fw.structuredContent.workflow.id;
+console.log("error port exposed:", JSON.stringify(fw.structuredContent.workflow.steps.find(s => s.id === "risky").ports));
+
+let r = await client.callTool({ name: "circuit_run", arguments: { workflowId: fwId } });
+let rid = r.structuredContent.run.id, dd = r.structuredContent.directive;
+const step = (args) => client.callTool({ name: "circuit_step", arguments: { runId: rid, ...args } });
+
+// retry: fail twice, succeed on the third
+dd = (await step({ stepId: "flaky", error: "429 rate limited" })).structuredContent.directive;
+console.log("after 1st failure ->", dd.act, dd.stepId, "| attempt", r.structuredContent.run.trace.find(t=>t.stepId==="flaky")?.attempts);
+let after = await step({ stepId: "flaky", error: "429 again" });
+dd = after.structuredContent.directive;
+console.log("after 2nd failure ->", dd.act, dd.stepId);
+after = await step({ stepId: "flaky", result: { threads: [] } });
+dd = after.structuredContent.directive;
+console.log("then succeeds     ->", dd.act, dd.stepId);
+
+// route: failure leaves by the error port
+after = await step({ stepId: "risky", error: "label not found" });
+dd = after.structuredContent.directive;
+console.log("route on failure  ->", dd.act, dd.stepId, "(expected fallback)");
+
+// stop: default policy halts the run, and resume picks it up
+after = await step({ stepId: "fallback", result: { ok: true } });
+dd = after.structuredContent.directive;
+after = await step({ stepId: "done", error: "recipient rejected" });
+dd = after.structuredContent.directive;
+console.log("stop on failure   ->", dd.act, "| failedAt:", after.structuredContent.run.failedAt);
+console.log("  reason:", dd.reason);
+
+const again = await client.callTool({ name: "circuit_resume", arguments: { runId: rid } });
+console.log("resume            ->", again.structuredContent.directive.act, again.structuredContent.directive.stepId);
+const skipped = await client.callTool({ name: "circuit_step", arguments: { runId: rid, stepId: "done", error: "still rejected" } });
+const over = await client.callTool({ name: "circuit_resume", arguments: { runId: rid, skip: true } });
+console.log("resume with skip  ->", JSON.stringify(over.structuredContent.directive));
+console.log("final status      ->", over.structuredContent.run.status);
+
 await client.close();
 console.log("\nSMOKE OK");

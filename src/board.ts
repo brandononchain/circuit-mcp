@@ -27,6 +27,7 @@ export function toBoard(wf: Workflow, run?: Run | null, extra: Record<string, un
         ports: portsOf(s),
         next: s.next,
         enabled: s.enabled !== false,
+        onError: s.onError ?? null,
         position: s.position ?? { col: 0, lane: 0 },
       })),
     },
@@ -34,7 +35,7 @@ export function toBoard(wf: Workflow, run?: Run | null, extra: Record<string, un
       ? {
           id: run.id, status: run.status, mode: run.mode,
           startedAt: run.startedAt, endedAt: run.endedAt,
-          trace: run.trace, awaiting: run.awaiting ?? null,
+          trace: run.trace, awaiting: run.awaiting ?? null, failedAt: run.failedAt ?? null,
         }
       : null,
     storage: storeKind(),
@@ -47,13 +48,16 @@ export function describe(wf: Workflow, run?: Run | null): string {
   const state = new Map((run?.trace ?? []).map((t) => [t.stepId, t]));
   const lines = wf.steps.map((s) => {
     const t = state.get(s.id);
-    const mark = t ? ` [${t.state}${t.summary ? ": " + t.summary : ""}]` : "";
+    const detail = t?.error && t.state === "failed" ? `: ${t.error}` : t?.summary ? `: ${t.summary}` : "";
+    const mark = t ? ` [${t.state}${detail}]` : "";
     const wires = s.next.map((e) => `${e.port === "out" ? "" : e.port + "→"}${e.to}`).join(", ");
     return `  ${s.id}  ${s.type}  "${s.title}"${wires ? `  → ${wires}` : ""}${mark}`;
   });
   const head = `${wf.name} (${wf.id}) — ${wf.status}, ${wf.steps.length} steps, entry: ${wf.entry}`;
   const tail = run
-    ? `\nrun ${run.id}: ${run.status}${run.awaiting ? ` — at ${run.awaiting.stepId}` : ""}`
+    ? `\nrun ${run.id}: ${run.status}` +
+      (run.awaiting ? ` — at ${run.awaiting.stepId}` : "") +
+      (run.failedAt ? ` — stopped on ${run.failedAt}, circuit_resume picks it up` : "")
     : "";
   return [head, ...lines].join("\n") + tail;
 }

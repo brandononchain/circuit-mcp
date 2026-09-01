@@ -32,6 +32,8 @@ export function newRun(wf: Workflow, trigger: unknown, mode: "test" | "live"): R
     queue: [wf.entry],
     loops: [],
     awaiting: null,
+    attempts: {},
+    failedAt: null,
     trace: wf.steps.map((s) => ({ stepId: s.id, state: "idle" as const })),
   };
 }
@@ -161,15 +163,19 @@ export function advance(wf: Workflow, run: Run): Directive {
     }
 
     /* ---- things Claude or the user has to do ---- */
-    mark(run, id, { state: "running" });
+    run.attempts ??= {};
+    run.attempts[id] = run.attempts[id] ?? 1;
+    mark(run, id, { state: "running", attempts: run.attempts[id] });
 
     if (step.type === "tool.call") {
       if (!cfg.tool) return blocked(run, id, `Step '${id}' has no connector tool bound yet.`);
       run.awaiting = { stepId: id, act: "call_tool" };
+      const again = (run.attempts?.[id] ?? 1) > 1 ? ` This is attempt ${run.attempts![id]}.` : "";
       return {
         act: "call_tool", stepId: id, title: step.title,
         tool: cfg.tool, arguments: cfg.arguments ?? {},
-        expect: "Call that tool exactly as given, then report the result with circuit_step.",
+        expect: "Call that tool exactly as given, then report the result with circuit_step. " +
+          "If the call fails, report the error with circuit_step's `error` instead of inventing a result." + again,
       };
     }
 
@@ -238,6 +244,86 @@ function blocked(run: Run, stepId: string, reason: string): Directive {
   run.endedAt = now();
   mark(run, stepId, { state: "failed", error: reason });
   return { act: "blocked", stepId, reason };
+}
+
+/**
+ * A step that went wrong. What happens next is the step's own business: stop the
+ * run, end just this path, hand Claude the same directive again, or leave by the
+ * error port so the board can show a fallback.
+ */
+export function fail(wf: Workflow, run: Run, stepId: string, error: string): Directive {
+  const step = wf.steps.find((s) => s.id === stepId);
+  if (!step) return { act: "blocked", stepId, reason: `No step '${stepId}' in this workflow.` };
+  if (run.awaiting?.stepId !== stepId) {
+    return { act: "blocked", stepId, reason: `This run is waiting on '${run.awaiting?.stepId ?? "nothing"}', not '${stepId}'.` };
+  }
+  run.awaiting = null;
+  run.attempts ??= {};
+  const tries = (run.attempts[stepId] ?? 1);
+  const policy = step.onError ?? { do: "stop" as const, attempts: 2, port: "error" };
+  const msg = String(error).slice(0, 400);
+
+  if (policy.do === "retry" && tries < (policy.attempts ?? 2)) {
+    run.attempts[stepId] = tries + 1;
+    run.status = "running";
+    mark(run, stepId, { state: "retrying", error: msg, attempts: tries + 1,
+      summary: `try ${tries + 1} of ${policy.attempts ?? 2}` });
+    run.queue.unshift(stepId);       // hand out the very same directive again
+    return advance(wf, run);
+  }
+
+  if (policy.do === "route") {
+    const port = policy.port || "error";
+    const wired = follow(step, port);
+    if (wired.length) {
+      run.status = "running";
+      mark(run, stepId, { state: "failed", error: msg, port, attempts: tries, summary: `failed \u2192 ${port}` });
+      run.data.steps[stepId] = { error: msg };
+      run.queue.unshift(...wired);
+      return advance(wf, run);
+    }
+    // nothing wired to the error port — falling through to stop is safer than
+    // pretending the failure was handled
+  }
+
+  if (policy.do === "skip") {
+    run.status = "running";
+    mark(run, stepId, { state: "failed", error: msg, attempts: tries, summary: "failed, path dropped" });
+    run.data.steps[stepId] = { error: msg };
+    return advance(wf, run);         // the loop, if any, moves to the next item
+  }
+
+  mark(run, stepId, { state: "failed", error: msg, attempts: tries });
+  run.status = "failed";
+  run.failedAt = stepId;
+  run.endedAt = now();
+  return {
+    act: "blocked", stepId,
+    reason: `${stepId} failed: ${msg}. Nothing after it ran. Fix the cause and call circuit_resume, ` +
+      `or circuit_resume with skip to carry on without it.`,
+  };
+}
+
+/** Pick a failed run back up, either retrying the step or stepping over it. */
+export function resume(wf: Workflow, run: Run, skip = false): Directive {
+  const stepId = run.failedAt;
+  if (!stepId) return { act: "blocked", stepId: "?", reason: `Run ${run.id} is ${run.status} and has nothing to pick up.` };
+  const step = wf.steps.find((s) => s.id === stepId);
+  if (!step) return { act: "blocked", stepId, reason: `Step '${stepId}' is no longer in this workflow.` };
+
+  run.status = "running";
+  run.failedAt = null;
+  run.endedAt = undefined;
+  if (run.attempts) delete run.attempts[stepId];
+
+  if (skip) {
+    mark(run, stepId, { state: "skipped", summary: "you stepped over it" });
+    run.queue.unshift(...follow(step, "out"));
+  } else {
+    mark(run, stepId, { state: "idle", error: undefined, summary: undefined });
+    run.queue.unshift(stepId);
+  }
+  return advance(wf, run);
 }
 
 /** Claude reports what happened; the walk continues. */
