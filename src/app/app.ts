@@ -15,11 +15,16 @@ type Directive = {
   preview?: string; text?: string; reason?: string; summary?: string;
 };
 type Trace = { stepId: string; state: string; port?: string; summary?: string; error?: string; attempts?: number };
+type Moment = {
+  stepId: string; at: string; state: string; port?: string;
+  summary?: string; error?: string; input?: unknown; output?: unknown; item?: unknown;
+};
 type Board = {
   workflow: { id: string; name: string; description: string; status: string; entry: string; steps: Chip[] };
   run: {
     id: string; status: string; mode: string; trace: Trace[];
     awaiting: { stepId: string; act: string } | null; failedAt?: string | null;
+    history?: Moment[];
   } | null;
   storage?: string;
   phase?: string;
@@ -39,6 +44,8 @@ let building: Partial<Chip>[] = [];
 let selected: string | null = null;
 let fitted = false;
 let wiring: { from: string; port: string; x: number; y: number } | null = null;
+/** index into run.history while replaying, or null when showing the final state */
+let replayAt: number | null = null;
 let logLines: string[] = [];
 let consoleState = { label: "circuit", sub: "idle", busy: false };
 
@@ -76,6 +83,7 @@ app.h.ontoolresult = (p: any) => {
   if (!props || !props.workflow) return;
   board = props as Board;
   building = [];
+  replayAt = null;
   const wf = board.workflow;
   const run = board.run;
   if (run) {
@@ -135,9 +143,28 @@ function traceLog(trace: Trace[]): string[] {
   return lines;
 }
 
+const history = () => board?.run?.history ?? [];
+const replaying = () => replayAt !== null && history().length > 0;
+
+/**
+ * While replaying, the board shows the run as it stood at that moment rather
+ * than as it ended — anything that had not happened yet is simply idle.
+ */
 function stateOf(id: string): string {
+  if (replaying()) {
+    const upto = history().slice(0, replayAt! + 1).filter((h) => h.stepId === id);
+    const last = upto[upto.length - 1];
+    if (!last) return "idle";
+    return history()[replayAt!].stepId === id ? "running" : last.state;
+  }
   const t = board?.run?.trace.find((x) => x.stepId === id);
   return t?.state ?? "idle";
+}
+
+function portAt(id: string): string | undefined {
+  if (!replaying()) return board?.run?.trace.find((t) => t.stepId === id)?.port;
+  const upto = history().slice(0, replayAt! + 1).filter((h) => h.stepId === id && h.port);
+  return upto[upto.length - 1]?.port;
 }
 const STATE_WORD: Record<string, string> = {
   running: "running", done: "ran", skipped: "not taken",
@@ -146,6 +173,13 @@ const STATE_WORD: Record<string, string> = {
 
 /** Nothing at all before a run — an "IDLE" badge on every chip is just noise. */
 function labelOf(id: string): string {
+  if (replaying()) {
+    const upto = history().slice(0, replayAt! + 1).filter((h) => h.stepId === id);
+    const last = upto[upto.length - 1];
+    if (!last) return "";
+    const s = last.summary || STATE_WORD[last.state] || last.state;
+    return s.length > 20 ? s.slice(0, 19) + "\u2026" : s;
+  }
   const t = board?.run?.trace.find((x) => x.stepId === id);
   if (!t || t.state === "idle") return "";
   const s = t.state === "failed" ? (t.summary || "failed")
@@ -168,6 +202,7 @@ function shell(inner: string, extra = "") {
       <span class="name" id="wfname" ${wf ? 'contenteditable="true" spellcheck="false"' : ""}>${esc(wf?.name ?? "Drawing\u2026")}</span>
       <span class="lab num" id="wfmeta">${esc(meta)}</span>
       <span class="sp"></span>
+      ${history().length ? `<button id="btn-replay" class="ghost">${replaying() ? "Latest" : "Replay"}</button>` : ""}
       ${wf ? `<button id="btn-fit" class="ghost">${fitted ? "Actual size" : "Fit"}</button>` : ""}
       ${wf ? `<button id="btn-full" class="ghost">Full screen</button>` : ""}
       ${wf?.description ? `<span class="why">${esc(wf.description)}</span>` : ""}
@@ -185,9 +220,46 @@ function shell(inner: string, extra = "") {
         </div>
         <span class="sub">${esc(consoleState.sub)}</span>
       </div>
-      ${selected ? inspectorHtml() : `<pre class="log mono" id="log">${logLines.slice(-4).map(esc).join("\n")}${consoleState.busy ? '<span class="caret"></span>' : ""}</pre>`}
+      ${replaying() ? replayHtml()
+        : selected ? inspectorHtml()
+        : `<pre class="log mono" id="log">${logLines.slice(-4).map(esc).join("\n")}${consoleState.busy ? '<span class="caret"></span>' : ""}</pre>`}
     </div>
     ${extra}
+  </div>`;
+}
+
+/**
+ * The scrubber. A finished run already knows what every step was handed and what
+ * came back, so stepping through it is the closest thing to watching it happen.
+ */
+function replayHtml() {
+  const h = history();
+  const i = Math.max(0, Math.min(replayAt ?? 0, h.length - 1));
+  const m = h[i];
+  const step = board?.workflow.steps.find((s) => s.id === m.stepId);
+  const time = m.at ? new Date(m.at).toLocaleTimeString(undefined, { hour12: false }) : "";
+  const body = (v: unknown) =>
+    v === undefined ? "<span style=\"opacity:.5\">nothing</span>"
+      : esc(typeof v === "string" ? v : JSON.stringify(v, null, 1));
+
+  const ticks = h.map((x, n) =>
+    `<i class="${x.state === "failed" ? "fail" : n === i ? "at" : n < i ? "past" : ""}" data-n="${n}"></i>`).join("");
+
+  return `<div class="replay">
+    <div class="replay-head">
+      <b>${esc(step?.title ?? m.stepId)}</b>
+      <span class="when mono">${esc(m.summary ?? m.state)}${time ? ` \u00b7 ${time}` : ""}</span>
+      <span class="sp"></span>
+      <span class="when mono num">${i + 1} / ${h.length}</span>
+      <button class="step-btn" id="rw" ${i === 0 ? "disabled" : ""}>\u2190</button>
+      <button class="step-btn" id="ff" ${i === h.length - 1 ? "disabled" : ""}>\u2192</button>
+    </div>
+    <div class="scrub" id="scrub">${ticks}</div>
+    <div class="io">
+      <div><dt>given</dt><pre class="mono">${body(m.item !== undefined && m.input === undefined ? m.item : m.input)}</pre></div>
+      <div><dt>${m.error ? "error" : "returned"}</dt><pre class="mono${m.error ? " err" : ""}">${
+        m.error ? esc(m.error) : body(m.output)}</pre></div>
+    </div>
   </div>`;
 }
 
@@ -220,7 +292,7 @@ function chipHtml(c: Partial<Chip>, i: number, state = "idle", label = "") {
   const x = PAD_X + pos.col * COL_W, y = PAD_Y + pos.lane * LANE_H;
 
   const all = c.ports ?? [];
-  const lit = board?.run?.trace.find((t) => t.stepId === c.id)?.port;
+  const lit = portAt(c.id!);
   const shown = all.length > 3 ? [...all.slice(0, 2), ...(lit && !all.slice(0, 2).includes(lit) ? [lit] : [])] : all;
   const ports = all.length > 1
     ? `<div class="no">${shown.map((p) =>
@@ -501,8 +573,8 @@ function drawTraces(steps: Chip[]) {
       const b = rect(w.to); if (!b) return;
       const offset = multi ? (i - (s.next.length - 1) / 2) * 16 : 0;
       const r = path(a, b, host, offset, busY);
-      const hot = stateOf(s.id) === "done" &&
-        (board?.run?.trace.find((t) => t.stepId === s.id)?.port ?? "out") === (w.port ?? "out") &&
+      const hot = ["done", "running"].includes(stateOf(s.id)) &&
+        (portAt(s.id) ?? "out") === (w.port ?? "out") &&
         stateOf(w.to) !== "idle" && stateOf(w.to) !== "skipped";
       const p = document.createElementNS(NS, "path");
       p.setAttribute("d", r.d);
@@ -538,6 +610,18 @@ function drawTraces(steps: Chip[]) {
 /* ------------------------------------------------------------ interaction */
 function wire() {
   const wf = board?.workflow;
+
+  el("btn-replay")?.addEventListener("click", () => {
+    replayAt = replaying() ? null : 0;
+    selected = null;
+    render();
+  });
+  el("rw")?.addEventListener("click", () => scrubTo((replayAt ?? 0) - 1));
+  el("ff")?.addEventListener("click", () => scrubTo((replayAt ?? 0) + 1));
+  el("scrub")?.addEventListener("click", (e) => {
+    const n = (e.target as HTMLElement).dataset?.n;
+    if (n !== undefined) scrubTo(Number(n));
+  });
 
   el("btn-full")?.addEventListener("click", () => app.requestDisplayMode("fullscreen").catch(() => {}));
   el("btn-fit")?.addEventListener("click", () => { fitted = !fitted; render(); });
@@ -592,6 +676,13 @@ function wire() {
     });
     n.addEventListener("pointerdown", (ev) => startDrag(ev, n));
   });
+}
+
+function scrubTo(n: number) {
+  const h = history();
+  if (!h.length) return;
+  replayAt = Math.max(0, Math.min(n, h.length - 1));
+  render();
 }
 
 function dropTarget(x: number, y: number): string | undefined {
@@ -720,6 +811,13 @@ async function call(name: string, args: Record<string, unknown>, quiet = false) 
 /* -------------------------------------------------------------------- go */
 applyTheme();
 app.connect().then(applyTheme).catch((e) => console.warn("circuit: host handshake failed", e));
+window.addEventListener("keydown", (e) => {
+  if (!replaying()) return;
+  if (e.key === "ArrowLeft") { e.preventDefault(); scrubTo((replayAt ?? 0) - 1); }
+  if (e.key === "ArrowRight") { e.preventDefault(); scrubTo((replayAt ?? 0) + 1); }
+  if (e.key === "Escape") { replayAt = null; render(); }
+});
+
 window.addEventListener("resize", () => {
   if (!board) return;
   drawTraces(board.workflow.steps);

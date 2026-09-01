@@ -38,6 +38,7 @@ export function toBoard(wf: Workflow, run?: Run | null, extra: Record<string, un
           id: run.id, status: run.status, mode: run.mode,
           startedAt: run.startedAt, endedAt: run.endedAt,
           trace: run.trace, awaiting: run.awaiting ?? null, failedAt: run.failedAt ?? null,
+          history: run.history ?? [],
         }
       : null,
     storage: storeKind(),

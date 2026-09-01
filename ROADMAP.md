@@ -19,39 +19,38 @@ Sequenced by what breaks first if you actually use it.
 | **Failure policies** | Per-step `stop` / `skip` / `retry` / `route`, an `error` port, and `circuit_resume` to pick a stopped run back up without repeating what already ran. |
 | **Honest test mode** | Steps that write come back as `preview` instead of running, detected from the verb and overridable per step. `circuit_arm` refuses a write with no approval gate on every path to it. |
 | **Wire editing** | Drag from an output port to a chip to connect; hover a wire to cut it. App-only, so it never costs a turn. |
+| **Run replay** | Every run records what each step was given and what came back, clipped; the board scrubs through it. |
+| **Fan-out with a join** | `logic.branches` runs several branches and continues once all of them are done. |
 
 ---
 
 ## Now
 
-### Run replay
+### Concurrency, honestly
 
-A finished run currently keeps what each step returned. Keep what each step
-*received* as well and the board becomes a scrubber: step through a past run,
-watch the payload move along the traces, click any chip to see exactly what went
-in and what came out. It is simultaneously the best debugging tool Circuit could
-have and the best thing to put in front of someone who has never seen it.
+`logic.branches` shipped as fan-out with a join, and it is deliberately
+sequential: Circuit walks one branch after another because the directive loop
+hands out one thing at a time. That is the correct shape for the graph and it is
+not what people mean by parallel.
 
-The storage change is small — one more field per trace entry — but it wants a
-decision about size: a run over fifty emails should not keep fifty full payloads
-forever. Likely a head/tail excerpt per step with the full value kept only for
-the most recent run of each workflow.
+The real version is a directive that carries several calls at once —
+`{"act": "call_many", "calls": [...]}` — which Claude answers in a single turn,
+because a model can make three tool calls in one message. Three lookups stop
+being three round trips.
 
-### `logic.parallel`
-
-Fan-out where order does not matter — three lookups that can happen at once.
-This is a real change to the state machine: the engine holds exactly one
-`awaiting` step today, and parallel means holding several and accepting results
-in any order. It comes after replay because replay is what makes the resulting
-traces legible.
-
-## Next
+It is a real change to the state machine: the engine holds exactly one
+`awaiting` step today, and this means holding a set, correlating results back to
+the steps that asked for them, and deciding what a partial failure means when two
+of three calls came back. That last question is the actual design work, and it is
+why this is its own item rather than a flag on `logic.branches`.
 
 ### Workflow inputs
 
 `{{input.customer}}` alongside `{{trigger.…}}`, declared on the workflow and
 prompted for by `circuit_run`. One board then serves many cases instead of being
 copied and edited, and a workflow becomes something you can hand to someone else.
+
+## Next
 
 ### Export and import
 
@@ -111,7 +110,7 @@ syntax.
 | | |
 | --- | --- |
 | **0.3** | Connector binding, failure policies, resume. |
-| **0.4** | Honest test mode, wire editing. *(current)* |
-| **0.5** | Run replay, `logic.parallel`. |
-| **0.6** | Workflow inputs, export/import, starter examples. |
+| **0.4** | Honest test mode, wire editing. |
+| **0.5** | Run replay, fan-out with a join. *(current)* |
+| **0.6** | Real concurrency, workflow inputs, export/import, starter examples. |
 | **1.0** | Multi-user hosting, observability, a deployment someone else can run. |

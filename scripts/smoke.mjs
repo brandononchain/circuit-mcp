@@ -213,5 +213,61 @@ console.log("after cut  :", JSON.stringify(w2.structuredContent.workflow.steps.f
 const self = await client.callTool({ name: "circuit_wire", arguments: { workflowId: twId, from: "go", to: "go" } });
 console.log("self wire  :", self.isError, "|", self.content[0].text);
 
+/* ---- run history, the thing replay scrubs ---- */
+console.log("\n--- run history ---");
+const hist = res.structuredContent.run.history ?? [];
+console.log(`${hist.length} moments recorded`);
+for (const m of hist.slice(0, 6)) {
+  const shape = (v) => v === undefined ? "-" : (JSON.stringify(v) ?? "").slice(0, 46);
+  console.log(`  ${String(m.stepId).padEnd(8)} ${String(m.state).padEnd(8)} in ${shape(m.input).padEnd(48)} out ${shape(m.output)}`);
+}
+// a deliberately huge result should come back trimmed, not stored whole
+const bigId = (await client.callTool({ name: "circuit_design", arguments: {
+  name: "Big payload", steps: [
+    { id: "go", type: "trigger.ask", title: "When I ask", config: {}, next: [{ port: "out", to: "fetch" }] },
+    { id: "fetch", type: "tool.call", title: "Fetch a lot",
+      config: { tool: "Gmail:search_threads", arguments: {} }, next: [] },
+  ],
+} })).structuredContent.workflow.id;
+const bigRun = await client.callTool({ name: "circuit_run", arguments: { workflowId: bigId } });
+const bigDone = await client.callTool({ name: "circuit_step", arguments: {
+  runId: bigRun.structuredContent.run.id, stepId: "fetch",
+  result: { body: "x".repeat(9000), rows: Array.from({ length: 40 }, (_, i) => ({ i, note: "y".repeat(600) })) },
+} });
+const rec = bigDone.structuredContent.run.history.find(m => m.stepId === "fetch");
+const stored = JSON.stringify(rec.output).length;
+console.log(`9 kB string + 40 rows stored as ${stored} bytes; clipped:`,
+  JSON.stringify(rec.output).includes("more characters") && JSON.stringify(rec.output).includes("more of 40"));
+
+/* ---- logic.branches: fan out, then join ---- */
+console.log("\n--- branches ---");
+const br = await client.callTool({ name: "circuit_design", arguments: {
+  name: "Three lookups then a summary",
+  steps: [
+    { id: "go", type: "trigger.ask", title: "When I ask", config: {}, next: [{ port: "out", to: "all" }] },
+    { id: "all", type: "logic.branches", title: "Gather everything", config: {},
+      next: [{ port: "out", to: "a" }, { port: "out", to: "b" }, { port: "out", to: "c" },
+             { port: "join", to: "sum" }] },
+    { id: "a", type: "tool.call", title: "Threads", config: { tool: "Gmail:search_threads", arguments: {} }, next: [] },
+    { id: "b", type: "tool.call", title: "Calendar", config: { tool: "Google_Calendar:list_events", arguments: {} }, next: [] },
+    { id: "c", type: "tool.call", title: "Labels", config: { tool: "Gmail:label_thread", arguments: {} },
+      writes: false, next: [] },
+    { id: "sum", type: "note.say", title: "Summarise", config: { template: "Here is everything." }, next: [] },
+  ],
+} });
+const brId = br.structuredContent.workflow.id;
+console.log("chip says:", br.structuredContent.workflow.steps.find(s => s.id === "all").summary);
+let b2 = await client.callTool({ name: "circuit_run", arguments: { workflowId: brId } });
+const bid = b2.structuredContent.run.id;
+let bd = b2.structuredContent.directive, order = [];
+let g = 0;
+while (bd && bd.act !== "done" && bd.act !== "blocked" && g++ < 12) {
+  order.push(bd.stepId);
+  b2 = await client.callTool({ name: "circuit_step", arguments: { runId: bid, stepId: bd.stepId, result: { ok: true } } });
+  bd = b2.structuredContent.directive;
+}
+console.log("order:", order.join(" → "), "|", JSON.stringify(bd));
+console.log("join fired after all three:", order.indexOf("sum") === order.length - 1 && order.includes("a") && order.includes("b") && order.includes("c"));
+
 await client.close();
 console.log("\nSMOKE OK");

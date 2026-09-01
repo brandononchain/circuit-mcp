@@ -226,6 +226,21 @@ export const STEPS: StepDef[] = [
   },
 
   {
+    type: "logic.branches", kind: "logic", label: "all of", actor: "circuit",
+    title: "Do several things",
+    blurb:
+      "Fans out to every wire on its `out` port, runs each branch to the end, then continues from the " +
+      "`join` port once they have all finished. Use it when several things must happen before one last " +
+      "step — three lookups before a summary, say. Circuit walks the branches one after another, since " +
+      "you do one thing at a time anyway; what this buys is the join, not speed.",
+    ports: ["out", "join"],
+    config: z.object({}),
+    summary: (_c, step) => {
+      const n = (step?.next ?? []).filter((e) => (e.port ?? "out") === "out").length;
+      return n ? `${n} branch${n === 1 ? "" : "es"}, then carries on` : "nothing wired yet";
+    },
+  },
+  {
     type: "gate.approve", kind: "gate", label: "ask you", actor: "user",
     title: "Hold for my approval",
     blurb:

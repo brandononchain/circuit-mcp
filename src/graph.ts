@@ -59,9 +59,31 @@ export type StepTrace = {
   ms?: number;
 };
 
+/**
+ * One suspended construct: a `logic.each` loop working through its items, or a
+ * `logic.branches` fan-out working through its branches. Both are "run this
+ * inner path repeatedly, then carry on at `after`", so they share a frame.
+ */
 export type LoopFrame = {
+  kind: "each" | "branches";
   stepId: string; items: any[]; index: number; limit: number;
+  /** each: the shared body. branches: one entry point per item. */
   body: string[]; after: string[];
+};
+
+/** One thing that happened, in order. The timeline a replay scrubs through. */
+export type HistoryEntry = {
+  stepId: string;
+  at: string;
+  state: StepRunState;
+  port?: string;
+  summary?: string;
+  error?: string;
+  /** what the step was given, and what came back — both clipped */
+  input?: unknown;
+  output?: unknown;
+  /** the loop item in play, when there was one */
+  item?: unknown;
 };
 
 export type Run = {
@@ -83,6 +105,8 @@ export type Run = {
   attempts?: Record<string, number>;
   /** the step a failed run stopped on, so it can be picked up again */
   failedAt?: string | null;
+  /** append-only timeline; `trace` is the current state, this is how it got there */
+  history?: HistoryEntry[];
   trace: StepTrace[];
 };
 

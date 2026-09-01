@@ -50,7 +50,7 @@ before a directive reaches you — never fill them in yourself.`;
 export function buildServer(workspace: string): McpServer {
   const store = getStore();
   const server = new McpServer(
-    { name: "circuit", version: "0.4.0", title: "Circuit" },
+    { name: "circuit", version: "0.5.0", title: "Circuit" },
     { instructions: INSTRUCTIONS },
   );
 
@@ -365,7 +365,9 @@ export function buildServer(workspace: string): McpServer {
 
   server.registerTool("circuit_runs", {
     title: "Show recent runs",
-    description: "Run history, newest first, with anything still waiting on the user called out.",
+    description:
+      "Run history, newest first, with anything still waiting on the user called out. The most recent " +
+      "run comes back on the board, where it can be replayed step by step.",
     inputSchema: { workflowId: z.string().optional(), limit: z.number().default(10) },
     _meta: ui(),
     annotations: { readOnlyHint: true },

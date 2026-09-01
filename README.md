@@ -91,6 +91,28 @@ Suggestions come from bigram similarity weighted toward the connector: a near-mi
 
 Binding is optional. Without it Circuit says plainly that it could not check, and gets out of the way.
 
+## Runs are replayable
+
+A run records what every step was **handed** and what came **back**, so a
+finished run is a timeline you can walk rather than a log you have to read.
+
+<img src="docs/board-replay.png" alt="Scrubbing back through a finished run" width="100%">
+
+Press **Replay** and the board shows the run as it stood at that moment — chips
+that hadn't happened yet are simply idle, the current one is lit, and the traces
+carry the payload only as far as it had actually got. Arrow keys step, the bar
+seeks, Escape returns to the end.
+
+Payloads are clipped on the way in, keeping the *shape* of a value while dropping
+the bulk: a 9 kB body plus forty rows stores as about 2.5 kB, still showing you
+it was forty rows of `{i, note}` with the first five intact. The timeline is
+capped at 240 moments and drops the oldest with a marker, so a loop over a large
+inbox can't grow a run without limit.
+
+This is the debugging tool. "It sent the wrong thing" stops being a mystery when
+you can look at the exact arguments the send step was given, three iterations
+into a loop.
+
 ## A test run doesn't send the email
 
 `mode: "test"` used to label the run and nothing else, which is worse than having
@@ -195,6 +217,7 @@ Twelve types. Four are settled by Circuit itself; the rest become directives.
 | **only if** | `logic.filter` | **Circuit** | Stops the path unless the conditions hold. |
 | **route** | `logic.branch` | **Circuit** | Routes on a value it already has. |
 | **for each** | `logic.each` | **Circuit** | Runs everything downstream once per item, with a hard limit. |
+| **all of** | `logic.branches` | **Circuit** | Fans out to several branches and continues at `join` once every one has finished. |
 | **ask you** | `gate.approve` | you | Parks the run and shows you an editable preview on the board. |
 | **report** | `note.say` | Claude | Reports back in the conversation. |
 
@@ -389,8 +412,9 @@ There is deliberately no third row. Circuit stores workflows and run history; it
 - [x] Failure policies, an `error` port, and a resumable run
 - [x] A test mode that actually withholds writes, and an arm that refuses unguarded ones
 - [x] Wire editing on the canvas — drag from a port to a chip, hover a wire to cut it
-- [ ] Run replay: scrub a past run and watch the payload move
-- [ ] `logic.parallel`, for fan-out that does not need ordering
+- [x] Run replay: scrub a past run and see what every step was given
+- [x] Fan-out with a join (`logic.branches`)
+- [ ] Concurrency — one directive carrying several tool calls, answered together
 - [ ] Workflow inputs, and an export format so boards are shareable
 
 The reasoning behind the order, and what Circuit deliberately will not do, is in
