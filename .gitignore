@@ -7,5 +7,7 @@ src/app/board.generated.ts
 scripts/harness.html
 scripts/fixtures.json
 *.png
+!docs/*.png
 h-*.png
+!docs/*.png
 shot*.mjs
