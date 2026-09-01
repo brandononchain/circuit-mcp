@@ -1,6 +1,6 @@
 {
   "name": "circuit-mcp",
-  "version": "0.3.1",
+  "version": "0.4.0",
   "private": false,
   "type": "module",
   "description": "A visual workflow builder that lives inside a Claude conversation and runs on the connectors you already have.",

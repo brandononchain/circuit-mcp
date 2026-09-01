@@ -8,7 +8,7 @@ import { BY_TYPE, catalog } from "./registry.js";
 import { describe, toBoard } from "./board.js";
 import { getStore } from "./store/index.js";
 import { advance, fail, newRun, report, resume, type Directive } from "./engine/run.js";
-import { checkTools, describeMissing, requiredTools, type ToolBinding } from "./tools.js";
+import { checkTools, describeMissing, requiredTools, stepWrites, unguardedWrites, type ToolBinding } from "./tools.js";
 
 export const APP_URI = "ui://circuit/board.html";
 export const APP_MIME = "text/html;profile=mcp-app";
@@ -50,7 +50,7 @@ before a directive reaches you — never fill them in yourself.`;
 export function buildServer(workspace: string): McpServer {
   const store = getStore();
   const server = new McpServer(
-    { name: "circuit", version: "0.3.1", title: "Circuit" },
+    { name: "circuit", version: "0.4.0", title: "Circuit" },
     { instructions: INSTRUCTIONS },
   );
 
@@ -278,8 +278,9 @@ export function buildServer(workspace: string): McpServer {
     title: "Start a run",
     description:
       "Begin a run and get the FIRST directive. Do exactly that one thing, then call circuit_step with " +
-      "the result to get the next one. mode 'test' walks the same path but marks the run as a rehearsal " +
-      "— you should still stop before anything that sends, posts or deletes and tell the user instead.",
+      "the result to get the next one. In mode 'test' any step that writes comes back as {\"act\":" +
+      "\"preview\"} instead — show the user what would go out and call nothing. Use test before the " +
+      "first live run of anything that sends.",
     inputSchema: {
       workflowId: z.string(),
       mode: z.enum(["test", "live"]).default("live"),
@@ -380,14 +381,31 @@ export function buildServer(workspace: string): McpServer {
   server.registerTool("circuit_arm", {
     title: "Mark a workflow live",
     description:
-      "Marks the workflow as the one to run on its schedule. Circuit has no scheduler of its own — " +
-      "after arming, set up one of the user's scheduled tasks to call circuit_run on this id.",
-    inputSchema: { workflowId: z.string() },
+      "Marks the workflow live. Circuit has no scheduler of its own — after arming, set up one of the " +
+      "user's scheduled tasks to call circuit_run on this id. Refuses if a step would write with no " +
+      "approval gate in front of it, because that is a thing to decide on purpose.",
+    inputSchema: {
+      workflowId: z.string(),
+      force: z.boolean().default(false).describe(
+        "Arm even though a step writes with no approval gate in front of it. Only after the user has " +
+        "seen a test run and said they want it to fire unattended."),
+    },
     _meta: ui(),
-  }, async ({ workflowId }) => {
+    annotations: { destructiveHint: true },
+  }, async ({ workflowId, force }) => {
     const wf = await load(workflowId);
     if (!wf) return oops(`No workflow ${workflowId}.`);
     const trig = wf.steps.find((s) => s.id === wf.entry);
+    const loose = unguardedWrites(wf);
+    if (loose.length && !force) {
+      return oops(
+        `This would go live with ${loose.length === 1 ? "a step that writes" : `${loose.length} steps that write`} ` +
+        `and no approval gate in front of ${loose.length === 1 ? "it" : "them"}:\n` +
+        loose.map((w) => `  ${w.stepId}: ${w.tool}`).join("\n") +
+        `\n\nAdd a gate.approve upstream with circuit_patch, or — if the user has seen a test run and ` +
+        `explicitly wants it to fire unattended — call circuit_arm again with force.`,
+      );
+    }
     wf.status = "armed"; wf.updatedAt = now();
     await store.putWorkflow(wf);
     const cron = trig?.type === "trigger.schedule" ? String(trig.config?.cron ?? "") : "";
@@ -442,6 +460,45 @@ export function buildServer(workspace: string): McpServer {
     wf.updatedAt = now();
     await store.putWorkflow(wf);
     return ok(`${stepId} is ${enabled ? "on" : "muted"}`, toBoard(wf, null, { phase: "design" }));
+  });
+
+  server.registerTool("circuit_wire", {
+    title: "Connect two chips",
+    description: "Draw a wire from one step's output port to another step. The board calls this when the user drags one.",
+    inputSchema: {
+      workflowId: z.string(), from: z.string(), to: z.string(),
+      port: z.string().default("out").describe("Which output of `from` the wire leaves by."),
+    },
+    _meta: ui(["app", "model"]),
+  }, async ({ workflowId, from, to, port }) => {
+    const wf = await load(workflowId);
+    if (!wf) return oops("gone");
+    const a = wf.steps.find((x) => x.id === from), b = wf.steps.find((x) => x.id === to);
+    if (!a || !b) return oops("no such step");
+    if (from === to) return oops("a step cannot wire to itself");
+    if (!a.next.some((e) => e.to === to && (e.port ?? "out") === port)) a.next.push({ port, to });
+    wf.steps = layout(wf.steps, wf.entry);
+    wf.version += 1; wf.updatedAt = now();
+    await store.putWorkflow(wf);
+    return ok(`${from} ${port === "out" ? "\u2192" : `(${port}) \u2192`} ${to}`, toBoard(wf, null, { phase: "design" }));
+  });
+
+  server.registerTool("circuit_unwire", {
+    title: "Cut a wire",
+    description: "Remove the connection between two steps. The board calls this when the user cuts one.",
+    inputSchema: {
+      workflowId: z.string(), from: z.string(), to: z.string(),
+      port: z.string().optional().describe("Omit to cut every wire between them."),
+    },
+    _meta: ui(["app", "model"]),
+  }, async ({ workflowId, from, to, port }) => {
+    const wf = await load(workflowId);
+    const a = wf?.steps.find((x) => x.id === from);
+    if (!wf || !a) return oops("gone");
+    a.next = a.next.filter((e) => !(e.to === to && (port === undefined || (e.port ?? "out") === port)));
+    wf.version += 1; wf.updatedAt = now();
+    await store.putWorkflow(wf);
+    return ok(`cut ${from} \u2192 ${to}`, toBoard(wf, null, { phase: "design" }));
   });
 
   server.registerTool("circuit_rename", {

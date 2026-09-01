@@ -104,6 +104,10 @@ const ToolCall = z.object({
   arguments: z.record(z.any()).default({}).describe(
     "Arguments for that tool. Use {{trigger.x}}, {{steps.<id>.y}} or {{item.z}} anywhere in a string " +
     "and Circuit substitutes the live value before handing the call back to you."),
+  writes: z.boolean().optional().describe(
+    "Does this change something outside Circuit — send, post, create, delete? Circuit guesses from " +
+    "the verb in the tool name and gets it right most of the time; set this when the guess would be " +
+    "wrong. A test run never actually calls a step that writes."),
 });
 
 export const STEPS: StepDef[] = [

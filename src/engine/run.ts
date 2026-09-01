@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type { Run, Step, StepTrace, Workflow } from "../graph.js";
 import { BY_TYPE, matches, pick, resolve } from "../registry.js";
+import { stepWrites } from "../tools.js";
 import { getStore } from "../store/index.js";
 
 const now = () => new Date().toISOString();
@@ -14,6 +15,7 @@ const now = () => new Date().toISOString();
  */
 export type Directive =
   | { act: "call_tool"; stepId: string; title: string; tool: string; arguments: Record<string, unknown>; expect: string }
+  | { act: "preview"; stepId: string; title: string; tool: string; arguments: Record<string, unknown>; expect: string }
   | { act: "think"; stepId: string; title: string; task: "classify" | "write" | "extract"; instruction: string; input: unknown; labels?: string[]; fields?: { name: string; description: string }[]; maxWords?: number; expect: string }
   | { act: "ask"; stepId: string; title: string; question: string; preview: string; expect: string }
   | { act: "say"; stepId: string; text: string; expect: string }
@@ -169,6 +171,21 @@ export function advance(wf: Workflow, run: Run): Directive {
 
     if (step.type === "tool.call") {
       if (!cfg.tool) return blocked(run, id, `Step '${id}' has no connector tool bound yet.`);
+
+      // A rehearsal that really sends the email is not a rehearsal.
+      if (run.mode === "test" && stepWrites(step)) {
+        run.awaiting = { stepId: id, act: "preview" };
+        mark(run, id, { state: "running", summary: "rehearsing" });
+        return {
+          act: "preview", stepId: id, title: step.title,
+          tool: cfg.tool, arguments: cfg.arguments ?? {},
+          expect:
+            "DO NOT call this tool. This is a test run and the step writes. Show the user the tool " +
+            "name and these exact arguments so they can see what would go out, then report {} with " +
+            "circuit_step to move on.",
+        };
+      }
+
       run.awaiting = { stepId: id, act: "call_tool" };
       const again = (run.attempts?.[id] ?? 1) > 1 ? ` This is attempt ${run.attempts![id]}.` : "";
       return {
@@ -333,11 +350,20 @@ export function report(wf: Workflow, run: Run, stepId: string, result: any): Dir
   if (run.awaiting?.stepId !== stepId) {
     return { act: "blocked", stepId, reason: `This run is waiting on '${run.awaiting?.stepId ?? "nothing"}', not '${stepId}'.` };
   }
+  const was = run.awaiting.act;
   run.awaiting = null;
   run.status = "running";
 
   let port = "out";
   let summary = "";
+
+  if (was === "preview") {
+    const cfg = resolve(step.config ?? {}, run.data) as any;
+    run.data.steps[stepId] = { previewed: true, tool: cfg.tool, arguments: cfg.arguments ?? {} };
+    mark(run, stepId, { state: "done", port: "out", summary: `would call ${cfg.tool}` });
+    run.queue.unshift(...follow(step, "out"));
+    return advance(wf, run);
+  }
 
   if (step.type === "model.classify") {
     const label = String(result?.label ?? "");

@@ -17,42 +17,12 @@ Sequenced by what breaks first if you actually use it.
 | **Twelve step types** | Triggers, `tool.call`, three model steps, filter / branch / each, an approval gate, and a report-back note. |
 | **Connector binding** | Claude reports what it can reach; a mistyped tool is a design-time error with a suggestion, and `circuit_run` refuses to start on one. |
 | **Failure policies** | Per-step `stop` / `skip` / `retry` / `route`, an `error` port, and `circuit_resume` to pick a stopped run back up without repeating what already ran. |
+| **Honest test mode** | Steps that write come back as `preview` instead of running, detected from the verb and overridable per step. `circuit_arm` refuses a write with no approval gate on every path to it. |
+| **Wire editing** | Drag from an output port to a chip to connect; hover a wire to cut it. App-only, so it never costs a turn. |
 
 ---
 
 ## Now
-
-### A test mode that actually withholds writes
-
-`mode: "test"` currently labels the run and nothing else — Claude will happily
-really send the email. That is the most dangerous gap in the project: the word
-"test" promises something the code does not deliver.
-
-Circuit cannot know which connector tools write, so the workflow declares it. A
-`tool.call` step gets `writes: true`, defaulted by a heuristic on the verb
-(`send`, `post`, `create`, `delete`, `update`, `archive` → writes; `search`,
-`list`, `get`, `read` → does not) and overridable at design time. In a test run
-those steps come back as `{"act": "preview"}` — *show the user exactly what you
-would call, with the resolved arguments, and do not call it* — and the board
-renders the payload instead of a result.
-
-The same flag pays off twice: an armed workflow can require that the first write
-in any run passes an approval gate, which is a much better default than trusting
-that whoever designed it remembered one.
-
-### Wire editing on the canvas
-
-Today the board is a viewer you can drag chips around. Dragging *from a port to
-another chip* — and cutting a wire — is what turns it into an editor, and it is
-the single largest jump in perceived quality still available.
-
-Two app-only tools (`circuit_wire`, `circuit_unwire`), a port hit-target on each
-chip, and a live trace that follows the cursor while you drag. Invisible to the
-model, like `circuit_move`, so rewiring never costs a turn.
-
----
-
-## Next
 
 ### Run replay
 
@@ -62,13 +32,20 @@ watch the payload move along the traces, click any chip to see exactly what went
 in and what came out. It is simultaneously the best debugging tool Circuit could
 have and the best thing to put in front of someone who has never seen it.
 
+The storage change is small — one more field per trace entry — but it wants a
+decision about size: a run over fifty emails should not keep fifty full payloads
+forever. Likely a head/tail excerpt per step with the full value kept only for
+the most recent run of each workflow.
+
 ### `logic.parallel`
 
 Fan-out where order does not matter — three lookups that can happen at once.
-This is a real change to the state machine: the engine currently holds exactly
-one `awaiting` step, and parallel means holding several and accepting results in
-any order. It comes after replay because replay makes the resulting traces
-legible.
+This is a real change to the state machine: the engine holds exactly one
+`awaiting` step today, and parallel means holding several and accepting results
+in any order. It comes after replay because replay is what makes the resulting
+traces legible.
+
+## Next
 
 ### Workflow inputs
 
@@ -133,8 +110,8 @@ syntax.
 
 | | |
 | --- | --- |
-| **0.3** | Connector binding, failure policies, resume. *(current)* |
-| **0.4** | Honest test mode, wire editing. |
+| **0.3** | Connector binding, failure policies, resume. |
+| **0.4** | Honest test mode, wire editing. *(current)* |
 | **0.5** | Run replay, `logic.parallel`. |
 | **0.6** | Workflow inputs, export/import, starter examples. |
 | **1.0** | Multi-user hosting, observability, a deployment someone else can run. |

@@ -172,5 +172,46 @@ const over = await client.callTool({ name: "circuit_resume", arguments: { runId:
 console.log("resume with skip  ->", JSON.stringify(over.structuredContent.directive));
 console.log("final status      ->", over.structuredContent.run.status);
 
+/* ---- test mode withholds writes ---- */
+console.log("\n--- test mode ---");
+const tw = await client.callTool({ name: "circuit_design", arguments: {
+  name: "Write guard", description: "One read, one write.",
+  steps: [
+    { id: "go", type: "trigger.ask", title: "When I ask", config: {}, next: [{ port: "out", to: "look" }] },
+    { id: "look", type: "tool.call", title: "Look it up",
+      config: { tool: "Gmail:search_threads", arguments: {} }, next: [{ port: "out", to: "reply" }] },
+    { id: "reply", type: "tool.call", title: "Send the reply",
+      config: { tool: "Gmail:reply", arguments: { body: "hello" } }, next: [] },
+  ],
+} });
+const twId = tw.structuredContent.workflow.id;
+const flags = tw.structuredContent.workflow.steps.map(s => `${s.id}:${s.writes}`).join(" ");
+console.log("write detection:", flags, "(guessed from the verb, nothing declared)");
+
+let t = await client.callTool({ name: "circuit_run", arguments: { workflowId: twId, mode: "test" } });
+const tid = t.structuredContent.run.id;
+let td = t.structuredContent.directive;
+console.log("read step   ->", td.act, td.tool);
+t = await client.callTool({ name: "circuit_step", arguments: { runId: tid, stepId: "look", result: { threads: [] } } });
+td = t.structuredContent.directive;
+console.log("write step  ->", td.act, td.tool, "|", td.expect.split(".")[0]);
+t = await client.callTool({ name: "circuit_step", arguments: { runId: tid, stepId: "reply", result: {} } });
+console.log("finished    ->", JSON.stringify(t.structuredContent.directive));
+console.log("trace says  ->", t.structuredContent.run.trace.find(x => x.stepId === "reply").summary);
+
+const armed = await client.callTool({ name: "circuit_arm", arguments: { workflowId: twId } });
+console.log("arm refused:", armed.isError, "|", armed.content[0].text.split("\n")[0]);
+const forced = await client.callTool({ name: "circuit_arm", arguments: { workflowId: twId, force: true } });
+console.log("arm forced :", !forced.isError);
+
+/* ---- wire editing ---- */
+console.log("\n--- wiring ---");
+const w1 = await client.callTool({ name: "circuit_wire", arguments: { workflowId: twId, from: "go", to: "reply" } });
+console.log("after wire :", JSON.stringify(w1.structuredContent.workflow.steps.find(s => s.id === "go").next));
+const w2 = await client.callTool({ name: "circuit_unwire", arguments: { workflowId: twId, from: "go", to: "reply" } });
+console.log("after cut  :", JSON.stringify(w2.structuredContent.workflow.steps.find(s => s.id === "go").next));
+const self = await client.callTool({ name: "circuit_wire", arguments: { workflowId: twId, from: "go", to: "go" } });
+console.log("self wire  :", self.isError, "|", self.content[0].text);
+
 await client.close();
 console.log("\nSMOKE OK");

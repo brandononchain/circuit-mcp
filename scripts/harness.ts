@@ -7,10 +7,26 @@ declare const FIXTURES: any;
 const iframe = document.getElementById("view") as HTMLIFrameElement;
 iframe.srcdoc = BOARD_HTML;
 
+/**
+ * A stand-in MCP client. AppBridge proxies everything through `request`, so that
+ * is the method that has to exist — implementing `callTool` alone looks right and
+ * silently fails every call the app makes.
+ */
 const fakeClient: any = {
   getServerCapabilities: () => ({ tools: {}, resources: {} }),
+  request: async (req: any) => {
+    if (req.method === "tools/call") {
+      const { name, arguments: args } = req.params ?? {};
+      log(`app \u2192 server  ${name}(${JSON.stringify(args ?? {}).slice(0, 110)})`);
+      return FIXTURES.afterMove;
+    }
+    if (req.method === "tools/list") return { tools: [] };
+    if (req.method === "resources/read") return { contents: [] };
+    log(`app \u2192 server  ${req.method}`);
+    return {};
+  },
   callTool: async (params: any) => {
-    log(`app → server  ${params.name}(${JSON.stringify(params.arguments).slice(0, 90)})`);
+    log(`app \u2192 server  ${params.name}`);
     return FIXTURES.afterMove;
   },
   listTools: async () => ({ tools: [] }),

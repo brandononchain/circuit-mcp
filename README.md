@@ -91,6 +91,52 @@ Suggestions come from bigram similarity weighted toward the connector: a near-mi
 
 Binding is optional. Without it Circuit says plainly that it could not check, and gets out of the way.
 
+## A test run doesn't send the email
+
+`mode: "test"` used to label the run and nothing else, which is worse than having
+no test mode at all — the word promises something the code doesn't deliver.
+
+Circuit can't know what a connector tool does, so a step declares it. Where it
+hasn't, the verb decides: `send`, `post`, `create`, `delete`, `reply` write;
+`search`, `list`, `get`, `read` don't. A step that writes comes back as a
+different directive in a test run:
+
+```jsonc
+{ "act": "preview", "stepId": "reply", "tool": "Gmail:reply",
+  "arguments": { "thread_id": "t9", "body": "Hi Dana — pricing scales with…" },
+  "expect": "DO NOT call this tool. This is a test run and the step writes. Show the
+             user the tool name and these exact arguments…" }
+```
+
+Everything upstream runs for real, so the draft you're reviewing is the draft
+that would actually go out — with the templates resolved, which is where most
+workflow bugs live.
+
+The same flag pays off twice. `circuit_arm` refuses a workflow where a write has
+no approval gate on every path to it, because *fires unattended and sends things
+nobody read* should be a decision, not an oversight:
+
+```
+This would go live with a step that writes and no approval gate in front of it:
+  reply: Gmail:reply
+
+Add a gate.approve upstream with circuit_patch, or — if the user has seen a test
+run and explicitly wants it to fire unattended — call circuit_arm again with force.
+```
+
+Chips that write carry a small dot after the title, so the ones that can do
+something irreversible are visible at a glance.
+
+## The board is an editor
+
+Pull a wire out of any output port and drop it on the chip it should reach.
+Hover a wire and it offers to cut itself.
+
+<img src="docs/board-wiring.png" alt="Dragging a wire from a port to another chip" width="100%">
+
+Both go through app-only tools, so rewiring a board never wakes the model or
+costs a turn — the same trick that makes dragging a chip free.
+
 ## Every workflow has a second path
 
 A step fails. The connector 403s, the record isn't there, the API is having a
@@ -215,6 +261,7 @@ Thirteen tools, one capability each. Three are invisible to the model.
 | `circuit_arm` · `circuit_disarm` | model + app | Marks a workflow live, and tells Claude how to schedule it. |
 | `circuit_answer` | app + model | Approve or reject a held gate, with edits. |
 | `circuit_move` | **app only** | Persists a drag. Invisible to the model, so a nudge never costs a turn. |
+| `circuit_wire` · `circuit_unwire` | app + model | Connect and cut, from the canvas or from chat. |
 | `circuit_set_enabled` · `circuit_rename` | app + model | Small edits from either side. |
 
 `circuit_move` is the reason the board feels like a canvas rather than a picture: `visibility: ["app"]` keeps it out of the model's tool list entirely, so dragging a chip writes to the server without waking Claude.
@@ -340,8 +387,8 @@ There is deliberately no third row. Circuit stores workflows and run history; it
 
 - [x] Connector binding, so a mistyped tool is a design-time error
 - [x] Failure policies, an `error` port, and a resumable run
-- [ ] A test mode that actually withholds writes rather than just labelling the run
-- [ ] Wire editing on the canvas — drag from a port to a chip
+- [x] A test mode that actually withholds writes, and an arm that refuses unguarded ones
+- [x] Wire editing on the canvas — drag from a port to a chip, hover a wire to cut it
 - [ ] Run replay: scrub a past run and watch the payload move
 - [ ] `logic.parallel`, for fan-out that does not need ordering
 - [ ] Workflow inputs, and an export format so boards are shareable

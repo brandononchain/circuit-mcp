@@ -5,7 +5,8 @@ type Wire = { port: string; to: string };
 type Chip = {
   id: string; type: string; kind: string; label?: string; actor?: string;
   title: string; summary: string; config?: Record<string, unknown>;
-  tool?: string | null; toolKnown?: boolean | null; onError?: { do: string; attempts?: number; port?: string };
+  tool?: string | null; toolKnown?: boolean | null; writes?: boolean;
+  onError?: { do: string; attempts?: number; port?: string };
   ports: string[]; next: Wire[]; enabled: boolean;
   position: { col: number; lane: number };
 };
@@ -37,6 +38,7 @@ let board: Board | null = null;
 let building: Partial<Chip>[] = [];
 let selected: string | null = null;
 let fitted = false;
+let wiring: { from: string; port: string; x: number; y: number } | null = null;
 let logLines: string[] = [];
 let consoleState = { label: "circuit", sub: "idle", busy: false };
 
@@ -203,6 +205,9 @@ function inspectorHtml() {
     ${c.tool ? `<dt>connector</dt><dd><code>${esc(c.tool)}</code>${
       c.toolKnown === false ? ' \u00b7 <span class="warn">not in your tool list</span>'
       : c.toolKnown === true ? ' \u00b7 checked' : ""}</dd>` : ""}
+    ${c.tool ? `<dt>effect</dt><dd>${c.writes
+      ? "writes \u2014 a test run shows it instead of calling it"
+      : "reads only"}</dd>` : ""}
     ${c.onError ? `<dt>on failure</dt><dd>${esc(FAILURE[c.onError.do] ?? c.onError.do)}</dd>` : ""}
     ${t && t.state !== "idle" ? `<dt>last run</dt><dd>${esc(t.summary || t.state)}${
       t.error ? `<pre class="warn">${esc(t.error)}</pre>` : ""}</dd>` : ""}
@@ -227,7 +232,7 @@ function chipHtml(c: Partial<Chip>, i: number, state = "idle", label = "") {
   const waiting = board?.run?.awaiting?.stepId === c.id;
   const unbound = c.toolKnown === false;
   const cls = ["node", state === "idle" ? "" : state, waiting ? "waiting" : "",
-    unbound ? "unbound" : "", c.enabled === false ? "muted" : "",
+    unbound ? "unbound" : "", c.writes ? "writes" : "", c.enabled === false ? "muted" : "",
     selected === c.id ? "sel" : ""].join(" ");
 
   // "Gmail · search threads" reads better with the service carrying the weight
@@ -308,6 +313,7 @@ function render() {
   document.getElementById("root")!.innerHTML = shell(chips, gate);
   sizeCanvas(wf.steps);
   drawTraces(wf.steps);
+  drawHandles(wf.steps);
   requestAnimationFrame(() => document.querySelectorAll(".node").forEach((n) => n.classList.add("in")));
   wire();
 }
@@ -409,10 +415,75 @@ function elbowFull(x1: number, y1: number, xv: number, y2: number, x2: number) {
   return `M${x1} ${y1} L${xv - c} ${y1} L${xv} ${y1 + s * c} L${xv} ${y2 - s * c} L${xv + c} ${y2} L${x2} ${y2}`;
 }
 
+let cutTimer = 0;
+/** Hovering a wire offers to cut it, right where you are looking. */
+function showCut(p: SVGPathElement, hit: SVGPathElement, from: string, to: string, port: string) {
+  const svg = el("traces")!;
+  clearTimeout(cutTimer);
+  svg.querySelectorAll(".cut").forEach((c) => c.remove());
+  svg.querySelectorAll(".trace.hover").forEach((t) => t.classList.remove("hover"));
+  p.classList.add("hover");
+
+  const len = p.getTotalLength();
+  const mid = p.getPointAtLength(len / 2);
+  const NS = "http://www.w3.org/2000/svg";
+  const g = document.createElementNS(NS, "g");
+  g.setAttribute("class", "cut");
+  g.setAttribute("transform", `translate(${mid.x} ${mid.y})`);
+  g.innerHTML =
+    `<circle r="8"></circle>` +
+    `<line x1="-3.2" y1="-3.2" x2="3.2" y2="3.2"></line>` +
+    `<line x1="3.2" y1="-3.2" x2="-3.2" y2="3.2"></line>`;
+  g.addEventListener("click", (e) => {
+    e.stopPropagation();
+    const wf = board?.workflow;
+    if (wf) call("circuit_unwire", { workflowId: wf.id, from, to, port });
+  });
+  const leave = () => {
+    cutTimer = window.setTimeout(() => {
+      p.classList.remove("hover");
+      g.remove();
+    }, 220);
+  };
+  g.addEventListener("pointerenter", () => clearTimeout(cutTimer));
+  g.addEventListener("pointerleave", leave);
+  hit.addEventListener("pointerleave", leave, { once: true });
+  svg.appendChild(g);
+}
+
 /** true while a run is still in flight — pulses only run then */
 function runInFlight() {
   const st = board?.run?.status;
   return st === "running" || st === "awaiting_approval";
+}
+
+/**
+ * One grab-handle per output port, sitting exactly where that port's trace
+ * leaves the chip — so pulling a wire starts from the thing the wire comes out
+ * of, rather than from some abstract edge of the card.
+ */
+function drawHandles(steps: Chip[]) {
+  const canvasEl = el("canvas")!;
+  canvasEl.querySelectorAll(".handle").forEach((h) => h.remove());
+  if (board?.run) return;               // wiring is a design-time act
+  const host = canvasEl.getBoundingClientRect();
+  for (const s of steps) {
+    const node = document.querySelector<HTMLElement>(`.node[data-id="${CSS.escape(s.id)}"]`);
+    if (!node) continue;
+    const r = node.getBoundingClientRect();
+    const ports = s.ports?.length ? s.ports : ["out"];
+    ports.forEach((port, i) => {
+      const off = ports.length > 1 ? (i - (ports.length - 1) / 2) * 16 : 0;
+      const h = document.createElement("div");
+      h.className = "handle";
+      h.dataset.from = s.id;
+      h.dataset.port = port;
+      h.style.left = `${r.right - host.left}px`;
+      h.style.top = `${r.top - host.top + r.height / 2 + off}px`;
+      h.innerHTML = ports.length > 1 ? `<span class="tip">${esc(portName(s.type, port))}</span>` : "";
+      canvasEl.appendChild(h);
+    });
+  }
 }
 
 function drawTraces(steps: Chip[]) {
@@ -437,6 +508,15 @@ function drawTraces(steps: Chip[]) {
       p.setAttribute("d", r.d);
       p.setAttribute("class", `trace${hot ? " hot" : ""}`);
       svg.appendChild(p);
+
+      // a fat invisible copy makes a 1.7px line clickable, and carries the cut
+      if (!board?.run) {
+        const hit = document.createElementNS(NS, "path");
+        hit.setAttribute("d", r.d);
+        hit.setAttribute("class", "hit");
+        hit.addEventListener("pointerenter", () => showCut(p, hit, s.id, w.to, w.port ?? "out"));
+        svg.appendChild(hit);
+      }
       if (hot && runInFlight()) {
         const pulse = document.createElementNS(NS, "path");
         pulse.setAttribute("d", r.d);
@@ -499,6 +579,10 @@ function wire() {
     call("circuit_resume", { runId: board.run.id, skip: true });
   });
 
+  document.querySelectorAll<HTMLElement>(".handle").forEach((h) => {
+    h.addEventListener("pointerdown", (ev) => startWire(ev, h));
+  });
+
   document.querySelectorAll<HTMLElement>(".node").forEach((n) => {
     n.addEventListener("dblclick", () => {
       const id = n.dataset.id!;
@@ -508,6 +592,58 @@ function wire() {
     });
     n.addEventListener("pointerdown", (ev) => startDrag(ev, n));
   });
+}
+
+function dropTarget(x: number, y: number): string | undefined {
+  const stack = document.elementsFromPoint(x, y) as Element[];
+  for (const node of stack) {
+    const chip = (node as HTMLElement).closest?.<HTMLElement>(".node");
+    if (chip?.dataset.id) return chip.dataset.id;
+  }
+  return undefined;
+}
+
+/** Pull a wire out of a port and drop it on the chip it should reach. */
+function startWire(ev: PointerEvent, handle: HTMLElement) {
+  const wf = board?.workflow;
+  if (!wf) return;
+  ev.preventDefault();
+  ev.stopPropagation();
+  const canvasEl = el("canvas")!;
+  const svg = el("traces")!;
+  const host = canvasEl.getBoundingClientRect();
+  const from = handle.dataset.from!, port = handle.dataset.port ?? "out";
+  const x0 = parseFloat(handle.style.left), y0 = parseFloat(handle.style.top);
+
+  handle.classList.add("armed");
+  canvasEl.classList.add("wiring");
+  const draft = document.createElementNS("http://www.w3.org/2000/svg", "path");
+  draft.setAttribute("class", "draft");
+  svg.appendChild(draft);
+  handle.setPointerCapture(ev.pointerId);
+
+  const move = (e: PointerEvent) => {
+    const x = e.clientX - host.left, y = e.clientY - host.top;
+    const bend = Math.max(14, Math.abs(x - x0) * 0.4);
+    draft.setAttribute("d", `M${x0} ${y0} L${x0 + bend} ${y0} L${x - 10} ${y} L${x} ${y}`);
+  };
+  const up = (e: PointerEvent) => {
+    handle.releasePointerCapture(ev.pointerId);
+    handle.removeEventListener("pointermove", move);
+    handle.removeEventListener("pointerup", up);
+    handle.classList.remove("armed");
+    canvasEl.classList.remove("wiring");
+    draft.remove();
+    // The chip under the cursor decides. elementFromPoint alone is not enough:
+    // trace hit-paths, other chips' handles and the SVG overlay all sit on top,
+    // so walk the whole stack and take the first chip in it.
+    const to = dropTarget(e.clientX, e.clientY);
+    if (!to || to === from) return;
+    consoleState = { label: "wiring", sub: `${from} \u2192 ${to}`, busy: true };
+    call("circuit_wire", { workflowId: wf.id, from, to, port });
+  };
+  handle.addEventListener("pointermove", move);
+  handle.addEventListener("pointerup", up);
 }
 
 function startDrag(ev: PointerEvent, node: HTMLElement) {
@@ -536,6 +672,7 @@ function startDrag(ev: PointerEvent, node: HTMLElement) {
     node.style.top = `${PAD_Y + lane * LANE_H}px`;
     step.position = { col, lane };
     drawTraces(wf.steps);
+    drawHandles(wf.steps);
   };
   const up = () => {
     node.classList.remove("dragging");
@@ -583,4 +720,8 @@ async function call(name: string, args: Record<string, unknown>, quiet = false) 
 /* -------------------------------------------------------------------- go */
 applyTheme();
 app.connect().then(applyTheme).catch((e) => console.warn("circuit: host handshake failed", e));
-window.addEventListener("resize", () => { if (board) drawTraces(board.workflow.steps); });
+window.addEventListener("resize", () => {
+  if (!board) return;
+  drawTraces(board.workflow.steps);
+  drawHandles(board.workflow.steps);
+});

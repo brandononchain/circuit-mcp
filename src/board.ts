@@ -1,5 +1,6 @@
 import type { Run, Workflow } from "./graph.js";
 import { BY_TYPE, portsOf, summarise, toolOf } from "./registry.js";
+import { stepWrites } from "./tools.js";
 import { storeKind } from "./store/index.js";
 
 /** Everything the canvas needs to draw itself. Kept small on purpose. */
@@ -28,6 +29,7 @@ export function toBoard(wf: Workflow, run?: Run | null, extra: Record<string, un
         next: s.next,
         enabled: s.enabled !== false,
         onError: s.onError ?? null,
+        writes: toolOf(s) ? stepWrites(s) : false,
         position: s.position ?? { col: 0, lane: 0 },
       })),
     },

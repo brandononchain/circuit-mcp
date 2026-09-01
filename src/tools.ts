@@ -113,6 +113,55 @@ export function suggest(wanted: string, known: string[]): string | undefined {
   return best && best.score >= 0.55 ? best.name : undefined;
 }
 
+/* ---------------------------------------------------------------- writes -- */
+
+/**
+ * Circuit cannot know what a connector tool does, so a step can declare
+ * `writes`. Where it hasn't, the verb is a good enough guess to keep a test run
+ * from sending real email — and a wrong guess is always overridable.
+ */
+const WRITE_VERBS = /(^|[_\-. ])(send|post|create|add|insert|write|update|edit|patch|put|delete|remove|archive|trash|move|upload|publish|reply|forward|invite|schedule|book|assign|comment|label|star|mark|set|approve|merge|close|pay|charge|transfer)([_\-. ]|$)/i;
+const READ_VERBS = /(^|[_\-. ])(get|list|search|read|find|fetch|query|show|describe|lookup|count|check|view)([_\-. ]|$)/i;
+
+export function looksLikeWrite(tool?: string): boolean {
+  if (!tool) return false;
+  const action = tool.split(/[:.]/).slice(1).join(" ") || tool;
+  if (READ_VERBS.test(action)) return false;
+  return WRITE_VERBS.test(action);
+}
+
+/** true when this step would change something outside Circuit. */
+export function stepWrites(step: Step): boolean {
+  const declared = (step.config as any)?.writes;
+  if (typeof declared === "boolean") return declared;
+  return looksLikeWrite((step.config as any)?.tool);
+}
+
+/**
+ * Write steps that no approval gate stands in front of. Every path from the
+ * trigger has to pass a gate for a write to count as guarded — one unguarded
+ * branch is enough to send something nobody looked at.
+ */
+export function unguardedWrites(wf: Workflow): { stepId: string; tool: string }[] {
+  const byId = new Map(wf.steps.map((s) => [s.id, s]));
+  const guarded = new Map<string, boolean>();   // id -> guarded on EVERY path so far
+  const walk = (id: string, seenGate: boolean, path: Set<string>) => {
+    if (path.has(id)) return;
+    const prior = guarded.get(id);
+    guarded.set(id, prior === undefined ? seenGate : prior && seenGate);
+    const step = byId.get(id);
+    if (!step) return;
+    const next = seenGate || step.type === "gate.approve";
+    const deeper = new Set(path).add(id);
+    for (const e of step.next) walk(e.to, next, deeper);
+  };
+  walk(wf.entry, false, new Set());
+
+  return wf.steps
+    .filter((s) => stepWrites(s) && s.enabled !== false && guarded.get(s.id) === false)
+    .map((s) => ({ stepId: s.id, tool: String((s.config as any)?.tool ?? s.type) }));
+}
+
 /** Which connectors a board touches, for the header line on the app. */
 export function servicesOf(wf: Workflow): string[] {
   return [...new Set(requiredTools(wf.steps).map((t) => t.tool.split(/[:.]/)[0]))];

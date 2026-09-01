@@ -56,6 +56,25 @@ button.ghost{background:transparent}
 @keyframes flow{from{stroke-dashoffset:1}to{stroke-dashoffset:0}}
 .pad{fill:var(--board);stroke:var(--trace);stroke-width:1.6}
 .pad.hot{fill:var(--pad);stroke:var(--pad)}
+.hit{stroke:transparent;stroke-width:14;fill:none;pointer-events:stroke;cursor:pointer}
+.trace.hover{stroke:var(--fault);stroke-width:2.2}
+.cut{cursor:pointer;pointer-events:all}
+.cut circle{fill:var(--panel);stroke:var(--fault);stroke-width:1.4}
+.cut line{stroke:var(--fault);stroke-width:1.5;stroke-linecap:round}
+.draft{stroke:var(--accent);stroke-width:1.9;stroke-dasharray:5 4;fill:none;pointer-events:none}
+
+/* output pads: grab one and pull a wire to another chip */
+.handle{position:absolute;width:11px;height:11px;margin:-5.5px 0 0 -2px;border-radius:2px;
+  background:transparent;cursor:crosshair;z-index:4}
+.handle:after{content:"";position:absolute;left:3px;top:3px;width:5px;height:5px;border-radius:50%;
+  background:var(--trace);transition:background .15s,transform .15s}
+.handle:hover:after,.handle.armed:after{background:var(--accent);transform:scale(1.5)}
+.handle .tip{position:absolute;left:14px;top:-4px;font-size:9.5px;letter-spacing:.04em;color:var(--accent);
+  background:var(--panel);border:1px solid var(--edge);border-radius:2px;padding:0 4px;
+  opacity:0;pointer-events:none;white-space:nowrap;transition:opacity .12s}
+.handle:hover .tip{opacity:1}
+.canvas.wiring .node{cursor:copy}
+.canvas.wiring .node:hover{border-color:var(--accent);box-shadow:0 0 0 1px var(--accent)}
 .silk{position:absolute;left:26px;bottom:12px;font-size:9.5px;letter-spacing:.16em;
   text-transform:uppercase;color:var(--ink-3);opacity:.5;pointer-events:none}
 
@@ -74,6 +93,8 @@ button.ghost{background:transparent}
 .node.failed{border-color:var(--fault);background:color-mix(in srgb,var(--fault) 6%,var(--chip))}
 .node.failed .ns{color:var(--fault);background:color-mix(in srgb,var(--fault) 14%,transparent)}
 .node.retrying{border-color:var(--accent);border-style:dashed}
+.node.writes .nt:after{content:"";display:inline-block;width:5px;height:5px;margin-left:6px;
+  border-radius:50%;background:var(--accent);vertical-align:middle;opacity:.75}
 .node.unbound{border-color:color-mix(in srgb,var(--fault) 62%,var(--edge));
   background:color-mix(in srgb,var(--fault) 5%,var(--chip))}
 .node.unbound .nh{background:color-mix(in srgb,var(--fault) 9%,var(--chip-head))}
