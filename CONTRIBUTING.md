@@ -33,6 +33,19 @@ of them fails:
 | `export-check.mjs` | a board survives export to a page and back, field for field |
 | `trace-check.mjs` | every shipped example walks the path it claims, and every step in it is reachable |
 
+`npm run store-check` is separate because it needs a database. It holds every
+storage backend to one contract — ordering, workspace scoping, upsert-not-insert,
+nested state surviving a round trip, and `seen()` handing the key to exactly one
+of eight racing callers. Without a `DATABASE_URL` it covers in-memory only and
+says so; CI runs it against a real Postgres.
+
+```bash
+DATABASE_URL=postgres://postgres@localhost:5432/circuit_test npm run store-check
+```
+
+If you add a method to `Store`, add its assertions there rather than to one
+backend's own tests — the point is that the backends cannot drift.
+
 Every check is an assertion. **A check that only prints is not a check** — this
 suite spent months green while `examples/inbox-triage.json` shipped with a
 filter that dropped every thread it was given, so the run went from the trigger

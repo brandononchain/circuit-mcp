@@ -8,6 +8,24 @@ on:
 jobs:
   check:
     runs-on: ubuntu-latest
+
+    # The store suite and the second wire run go against a real Postgres. A
+    # backend that only ever runs in-memory in CI is a backend nobody tested.
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: circuit_test
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+
+    env:
+      PGSSLMODE: disable
+
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -23,6 +41,12 @@ jobs:
       # Every check below asserts and exits non-zero on failure. If you are
       # adding one, put it in scripts/ using the helpers in scripts/expect.mjs —
       # a check that only prints is not a check.
+      - name: both storage backends, same contract
+        env:
+          DATABASE_URL: postgres://postgres:postgres@localhost:5432/circuit_test
+          STORE_CHECK_REQUIRE_PG: "1"
+        run: npm run store-check
+
       - name: start the server
         run: |
           npm run dev &
@@ -54,3 +78,22 @@ jobs:
           PORT=8788 PUBLIC_BASE_URL=http://localhost:8788 CIRCUIT_OWNER_KEY=ci-owner-key npm run dev &
           for i in $(seq 1 30); do curl -sf http://localhost:8788/health > /dev/null && break; sleep 1; done
           CIRCUIT_OWNER_KEY=ci-owner-key URL=http://localhost:8788 node scripts/oauth-check.mjs
+
+      # The shape that actually ships to Railway: the bundled single-file server,
+      # backed by Postgres. Anything that only works under tsx is caught here.
+      - name: the production bundle, on postgres
+        env:
+          DATABASE_URL: postgres://postgres:postgres@localhost:5432/circuit_live
+        run: |
+          PGPASSWORD=postgres psql -h localhost -U postgres -c "create database circuit_live"
+          npm run build:server
+          PORT=8790 node dist/server.js &
+          for i in $(seq 1 30); do curl -sf http://localhost:8790/health > /dev/null && break; sleep 1; done
+          curl -sf http://localhost:8790/health | tee /tmp/health.json
+          grep -q '"storage":"postgres"' /tmp/health.json
+          grep -q '"durable":true' /tmp/health.json
+          URL=http://localhost:8790/mcp node scripts/smoke.mjs
+          URL=http://localhost:8790/mcp node scripts/trace-check.mjs
+
+      - name: the docker image builds
+        run: docker build -t circuit-mcp:ci .

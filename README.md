@@ -572,21 +572,47 @@ One entry in `src/registry.ts`. `kind` picks the chip's silkscreen label, `actor
 
 ## Deploy
 
+Circuit is one `handle(req, res)` behind two thin adapters, so it runs either as a long-lived process or as a serverless function.
+
+**As a process — Railway, Fly, a VM.** The recommended shape: a persistent process can hold a Postgres pool, so storage is an ordinary database.
+
+```bash
+railway add --database postgres    # sets DATABASE_URL
+railway up                         # railway.json → Dockerfile → npm run build:server
+```
+
+Full walkthrough in [docs/deploy-railway.md](docs/deploy-railway.md). Locally that path is `npm run build:server && npm start`.
+
+**As a function — Vercel.** `src/vercel.ts` is a nine-line adapter. A function is too short-lived to keep a TCP pool open, so it reaches storage over HTTP instead, which is what Supabase is doing here.
+
 ```bash
 npm run build                      # → .vercel/output (Build Output API v3)
 vercel deploy --prebuilt --prod
 ```
 
-Any Node 20 host works; `src/vercel.ts` is a nine-line adapter over the same `handle(req, res)` that `npm run dev` uses.
+### Storage
+
+`getStore()` picks a backend from the environment, in this order:
+
+| | selected by | durable | notes |
+| --- | --- | --- | --- |
+| Postgres | `DATABASE_URL` | yes | A real pool. Applies its own schema on first connect, so there is no migration step. `seen()` is one atomic statement, which is what makes an OAuth code genuinely single-use. |
+| Supabase | `SUPABASE_URL` + `SUPABASE_SERVICE_ROLE_KEY` | yes | PostgREST over `fetch`, for serverless hosts. |
+| in-memory | neither | **no** | The fallback. Genuinely usable on a long-lived process — one heap, alive between requests — but a redeploy or crash loses every workflow and run. `/health` reports `durable: false` and says so. |
+
+Both backends are held to the same contract by `npm run store-check`.
 
 | Variable | What happens without it |
 | --- | --- |
-| `SUPABASE_URL` + `SUPABASE_SERVICE_ROLE_KEY` | Falls back to in-memory storage — fine locally, lossy on serverless. Run `src/store/schema.sql` once. |
+| `DATABASE_URL` | No Postgres. Falls back to Supabase, then to in-memory. |
+| `SUPABASE_URL` + `SUPABASE_SERVICE_ROLE_KEY` | Only consulted when `DATABASE_URL` is unset. Apply `SCHEMA` from `src/store/schema.ts`, plus `SUPABASE_LOCKDOWN`. |
+| `PUBLIC_BASE_URL` | OAuth metadata advertises the request's own origin, which is wrong behind a proxy. |
 | `CIRCUIT_OWNER_KEY` | No OAuth: `/mcp` is open. Set it before exposing the server anywhere. |
 | `CIRCUIT_SECRET` | Signing falls back to a value derived from the owner key. Set it to rotate tokens independently of the key. |
 | `CIRCUIT_TOKENS` | Legacy bearer tokens, ignored once `CIRCUIT_OWNER_KEY` is set: `brandon=sometoken,team=othertoken`. |
+| `PGSSLMODE`, `PGPOOL_MAX` | TLS is inferred from the host and the pool holds 10. |
 
-There is deliberately no third row. Circuit stores workflows and run history; it never stores anything belonging to a connector.
+There is deliberately no row for connector credentials. Circuit stores workflows and run history; it never stores anything belonging to a connector.
 
 ---
 

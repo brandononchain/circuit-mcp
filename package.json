@@ -19,18 +19,23 @@
     "build:node": "node scripts/build-node.mjs",
     "check": "node scripts/smoke.mjs && node scripts/protocol-check.mjs && node scripts/export-check.mjs && node scripts/trace-check.mjs",
     "trace": "node scripts/trace-check.mjs",
-    "trace:update": "UPDATE_TRACES=1 node scripts/trace-check.mjs"
+    "trace:update": "UPDATE_TRACES=1 node scripts/trace-check.mjs",
+    "build:server": "node scripts/build-app.mjs && node scripts/build-server.mjs",
+    "start": "node dist/server.js",
+    "store-check": "tsx scripts/store-check.ts"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.22.0",
+    "@types/pg": "^8.23.1",
+    "pg": "^8.23.0",
     "zod": "^3.24.1"
   },
   "devDependencies": {
+    "@modelcontextprotocol/ext-apps": "^1.7.5",
     "@types/node": "^22.10.0",
     "esbuild": "^0.24.2",
     "tsx": "^4.19.2",
-    "typescript": "^5.7.2",
-    "@modelcontextprotocol/ext-apps": "^1.7.5"
+    "typescript": "^5.7.2"
   },
   "license": "MIT",
   "keywords": [

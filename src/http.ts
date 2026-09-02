@@ -1,7 +1,7 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { buildServer } from "./server.js";
-import { getStore, storeKind } from "./store/index.js";
+import { getStore, storeKind, storageIsDurable } from "./store/index.js";
 import {
   authorizationServerMetadata, oauthConfig, ownerKeyMatches, protectedResourceMetadata,
   readAccess, readClient, redeemCode, refresh, registerClient, issueCode, issueTokens,
@@ -160,6 +160,12 @@ export async function handle(req: IncomingMessage, res: ServerResponse) {
     return send(res, 200, JSON.stringify({
       ok: true,
       storage: storeKind(),
+      /* Worth saying out loud: in-memory looks fine until the first redeploy. */
+      durable: storageIsDurable(),
+      ...(storageIsDurable() ? {} : {
+        warning: "in-memory storage — every workflow and run is lost on restart. "
+          + "Set DATABASE_URL to a Postgres connection string to persist.",
+      }),
       auth: cfg ? "oauth" : tokenMap().size ? "token" : "open",
       integrations: "none — Circuit runs on the caller's own connectors",
     }));

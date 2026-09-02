@@ -48,10 +48,27 @@ export function eq(what, actual, expected) {
 }
 
 export function deepEq(what, actual, expected) {
-  const a = JSON.stringify(actual), b = JSON.stringify(expected);
+  const a = stable(actual), b = stable(expected);
   if (a === b) pass(`${what} ${DIM}= ${trunc(b)}${OFF}`);
   else fail(what, `expected ${trunc(b)}\n     got ${trunc(a)}`);
   return a === b;
+}
+
+/**
+ * JSON with object keys in a fixed order. Array order is left alone, since that
+ * is usually the thing under test. Postgres `jsonb` does not preserve the key
+ * order it was given, so a plain JSON.stringify comparison would report a
+ * perfectly good round trip as a difference.
+ */
+function stable(v) {
+  const walk = (x) => {
+    if (Array.isArray(x)) return x.map(walk);
+    if (x && typeof x === "object") {
+      return Object.fromEntries(Object.keys(x).sort().map((k) => [k, walk(x[k])]));
+    }
+    return x;
+  };
+  return JSON.stringify(walk(v));
 }
 
 export function includes(what, haystack, needle) {
