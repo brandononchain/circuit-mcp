@@ -1,0 +1,34 @@
+# a sales thread gets a drafted reply
+call_tool watch Gmail:search_threads
+think intent classify
+think draft write
+ask gate
+call_tool send Gmail:reply
+say recap
+done
+
+# a scheduling thread checks the calendar
+call_tool watch Gmail:search_threads
+think intent classify
+call_tool slots Google_Calendar:list_events
+say recap
+done
+
+# anything else is labelled for a human
+call_tool watch Gmail:search_threads
+think intent classify
+call_tool label Gmail:label_thread
+say recap
+done
+
+# rejecting the gate stops before sending
+call_tool watch Gmail:search_threads
+think intent classify
+think draft write
+ask gate
+done
+
+# an empty inbox still finishes
+call_tool watch Gmail:search_threads
+say recap
+done

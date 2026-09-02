@@ -1,0 +1,13 @@
+# both sources are gathered, then the digest is posted
+call_many gather [mail meetings]
+think write write
+ask check
+call_tool post Slack:send_message
+done
+
+# an edit at the gate replaces the text that gets posted
+call_many gather [mail meetings]
+think write write
+ask check
+call_tool post Slack:send_message
+done

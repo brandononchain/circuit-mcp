@@ -1,0 +1,21 @@
+# a named company is recorded and answered
+think read extract
+call_tool record Airtable:create_records_for_table
+think reply write
+ask gate
+call_tool send Gmail:send_message
+done
+
+# no company still routes through the CRM
+think read extract
+call_tool record Airtable:create_records_for_table
+think reply write
+ask gate
+call_tool send Gmail:send_message
+done
+
+# a CRM failure takes the error port and flags it
+think read extract
+call_tool record Airtable:create_records_for_table
+say flag
+done

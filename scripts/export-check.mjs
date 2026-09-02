@@ -1,12 +1,24 @@
 /* Exports a workflow, checks the page, and imports it straight back. */
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
-import { writeFileSync } from "node:fs";
-const c = new Client({ name: "exp", version: "1" });
-await c.connect(new StreamableHTTPClientTransport(new URL(process.env.URL ?? "http://localhost:8787/mcp")));
-await c.callTool({ name: "circuit_bind", arguments: { tools: [
-  { name: "Gmail:search_threads" }, { name: "Gmail:reply" }, { name: "Gmail:label_thread" },
-  { name: "Google_Calendar:list_events" } ] } });
+import { writeFileSync, readdirSync, readFileSync } from "node:fs";
+import { ok, eq, deepEq, includes, between, section, note, done } from "./expect.mjs";
+
+const connect = async (name) => {
+  const c = new Client({ name, version: "1" });
+  await c.connect(new StreamableHTTPClientTransport(new URL(process.env.URL ?? "http://localhost:8787/mcp")));
+  return c;
+};
+const c = await connect("exp");
+
+/* The connector surface a user with mail, calendar, chat and a base would have. */
+const CONNECTOR_TOOLS = [
+  "Gmail:search_threads", "Gmail:reply", "Gmail:label_thread", "Gmail:send_message",
+  "Google_Calendar:list_events", "Slack:send_message",
+  "Airtable:create_records_for_table", "Airtable:list_records_for_table",
+];
+await c.callTool({ name: "circuit_bind", arguments: { tools: CONNECTOR_TOOLS.map((name) => ({ name })) } });
+
 const d = await c.callTool({ name: "circuit_design", arguments: {
   name: "Inbox triage & reply", description: "Sorts unread mail and drafts the easy replies.",
   inputs: [
@@ -37,28 +49,68 @@ const d = await c.callTool({ name: "circuit_design", arguments: {
   ],
 } });
 const id = d.structuredContent.workflow.id;
+const original = d.structuredContent.workflow;
+
+section("the exported page");
 const ex = await c.callTool({ name: "circuit_export", arguments: { workflowId: id } });
 const html = ex.content[0].text.split("--- begin html ---\n")[1].split("\n--- end html ---")[0];
 writeFileSync("exported.html", html);
-console.log("page bytes:", html.length, "| roughly", Math.round(html.length / 3.6), "tokens");
+note(`${html.length} bytes, roughly ${Math.round(html.length / 3.6)} tokens`);
+between("page size in bytes", html.length, 4000, 60000);
+ok("it is a standalone document", html.trimStart().startsWith("<!"), html.slice(0, 40));
+ok("with no script tag", !/<script/i.test(html), "an exported board must render without JS");
+includes("the definition travels in the page", html, 'id="circuit-workflow"');
+includes("a person can read the name off it", html, "Inbox triage &amp; reply");
+
+section("round trip");
 const back = await c.callTool({ name: "circuit_import", arguments: { source: html } });
-console.log("\n--- import ---\n" + back.content[0].text.split("\n").slice(0, 4).join("\n"));
-console.log("inputs survived:", JSON.stringify(back.structuredContent.workflow.inputs?.map(i => i.name)));
+ok("the page imports back", !back.isError, back.content?.[0]?.text);
+const wf = back.structuredContent.workflow;
+eq("every step survived", wf.steps.length, original.steps.length);
+deepEq("declared inputs survived", wf.inputs?.map((i) => i.name), ["voice", "max"]);
+deepEq("the wiring survived",
+  wf.steps.map((s) => [s.id, s.next.map((n) => `${n.port}->${n.to}`).join(",")]),
+  original.steps.map((s) => [s.id, s.next.map((n) => `${n.port}->${n.to}`).join(",")]));
+deepEq("the connector bound to each step survived",
+  wf.steps.map((s) => s.tool ?? null),
+  original.steps.map((s) => s.tool ?? null));
+/* The returned board is a view with no config on it, so compare the stored JSON. */
+const full = async (wid) => JSON.parse((await c.readResource({ uri: `circuit://workflow/${wid}` })).contents[0].text);
+const [before, after] = [await full(id), await full(wf.id)];
+deepEq("and so did every step config, field for field",
+  after.steps.map((s) => [s.id, JSON.stringify(s.config)]),
+  before.steps.map((s) => [s.id, JSON.stringify(s.config)]));
+ok("configs are not empty, so that comparison means something",
+  before.steps.filter((s) => Object.keys(s.config ?? {}).length).length >= 7,
+  JSON.stringify(before.steps.map((s) => Object.keys(s.config ?? {}).length)));
+
+section("input guards");
 const missing = await c.callTool({ name: "circuit_run", arguments: { workflowId: id } });
-console.log("\nrequired input guard:", missing.isError, "|", missing.content[0].text.split("\n")[0]);
+ok("a run without a required input is refused", missing.isError === true, missing.content?.[0]?.text);
+includes("and it names the input", missing.content[0].text, "voice");
 const okRun = await c.callTool({ name: "circuit_run", arguments: { workflowId: id, input: { voice: "brandononchain" } } });
-console.log("with input:", !okRun.isError, "|", okRun.structuredContent.directive.act);
+ok("supplying it lets the run start", !okRun.isError, okRun.content?.[0]?.text);
+eq("with a real first directive", okRun.structuredContent.directive.act, "call_tool");
+
 const junk = await c.callTool({ name: "circuit_import", arguments: { source: "<html>nothing here</html>" } });
-console.log("junk guard:", junk.isError);
+ok("a page with no definition in it is rejected", junk.isError === true, junk.content?.[0]?.text);
+
 await c.close();
 
-/* every starter board must import cleanly */
-import { readdirSync, readFileSync } from "node:fs";
-const c2 = new Client({ name: "ex", version: "1" });
-await c2.connect(new StreamableHTTPClientTransport(new URL(process.env.URL ?? "http://localhost:8787/mcp")));
+section("every starter board imports cleanly");
+const c2 = await connect("ex");
+await c2.callTool({ name: "circuit_bind", arguments: { tools: CONNECTOR_TOOLS.map((name) => ({ name })) } });
 for (const f of readdirSync("examples").filter((f) => f.endsWith(".json"))) {
   const r = await c2.callTool({ name: "circuit_import", arguments: { source: readFileSync(`examples/${f}`, "utf8") } });
-  const wf = r.structuredContent?.workflow;
-  console.log(`${f.padEnd(22)} ${r.isError ? "REJECTED: " + r.content[0].text.split("\n")[0] : `ok — ${wf.steps.length} steps, asks for ${(wf.inputs ?? []).map(i => i.name).join(", ") || "nothing"}`}`);
+  if (!ok(`examples/${f}`, !r.isError, r.content?.[0]?.text)) continue;
+  const w = r.structuredContent.workflow;
+  ok(`examples/${f} — every wire points at a real step`,
+    w.steps.every((s) => s.next.every((n) => w.steps.some((t) => t.id === n.to))),
+    JSON.stringify(w.steps.flatMap((s) => s.next.map((n) => `${s.id}->${n.to}`))));
+  ok(`examples/${f} — every connector tool is one a real connector offers`,
+    w.steps.every((s) => s.toolKnown !== false),
+    `unknown: ${JSON.stringify(w.steps.filter((s) => s.toolKnown === false).map((s) => s.tool))}\n` +
+    `bound for this check: ${CONNECTOR_TOOLS.join(", ")}`);
 }
 await c2.close();
+done("export checks");

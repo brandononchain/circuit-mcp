@@ -491,7 +491,10 @@ scripts/
   build-app.mjs         inlines the app into a single self-contained ui:// resource
   build-output.mjs      Vercel Build Output API v3
   harness.ts            a local host, running the OFFICIAL AppBridge
+  expect.mjs            the assertion harness every check script uses
   smoke.mjs             drives a full run over the wire
+  trace-check.mjs       golden traces + step coverage for every example
+  scenarios.mjs         what "running correctly" means for each example
 ```
 
 ### Reading a chip
@@ -544,14 +547,22 @@ npm run typecheck
 With the server running:
 
 ```bash
-node scripts/smoke.mjs        # the whole product, over the wire
+npm run check                    # the four suites below, ~150 assertions
+node scripts/smoke.mjs           # the engine, over the wire
 node scripts/protocol-check.mjs  # tools, prompts, resources, templates, completions
 node scripts/export-check.mjs    # export → import round trip, and every example
+node scripts/trace-check.mjs     # golden traces + step coverage for the examples
 node scripts/stdio-check.mjs     # the packaged stdio build
 CIRCUIT_OWNER_KEY=... node scripts/oauth-check.mjs   # the full OAuth flow
 ```
 
-That connects a real MCP client, lists the tools and their `_meta.ui` bindings, reads the `ui://` resource, designs a nine-step workflow with a loop and a gate, then **plays the part of Claude** — taking each directive, returning a plausible result, and checking that templates resolved, the loop turned over, the gate held, and the out-of-order guard fires.
+`smoke.mjs` connects a real MCP client, lists the tools and their `_meta.ui` bindings, reads the `ui://` resource, designs a nine-step workflow with a loop and a gate, then **plays the part of Claude** — taking each directive, returning a plausible result, and asserting that templates resolved, the loop turned over, the gate's edit reached the send step, retries counted, a routed failure left by the error port, and the out-of-order guard fired.
+
+`trace-check.mjs` is the one that catches the quiet failures. It drives every board in `examples/` to completion once per scenario, diffs the directive sequence against a checked-in trace, and requires that **every step in the example is reached by some scenario**. A workflow whose filter drops everything still runs, still ends `done`, and still looks fine in the transcript — it just never reaches most of itself. Only coverage catches that.
+
+```bash
+npm run trace:update             # after a deliberate change to an example
+```
 
 ### Adding a step type
 

@@ -16,7 +16,10 @@
     "harness": "npm run build:app && node scripts/gen-fixtures.mjs && node scripts/build-harness.mjs",
     "smoke": "node scripts/smoke.mjs",
     "dev:stdio": "npm run build:app && tsx src/stdio.ts",
-    "build:node": "node scripts/build-node.mjs"
+    "build:node": "node scripts/build-node.mjs",
+    "check": "node scripts/smoke.mjs && node scripts/protocol-check.mjs && node scripts/export-check.mjs && node scripts/trace-check.mjs",
+    "trace": "node scripts/trace-check.mjs",
+    "trace:update": "UPDATE_TRACES=1 node scripts/trace-check.mjs"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.22.0",

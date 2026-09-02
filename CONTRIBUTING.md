@@ -20,12 +20,28 @@ board against the real protocol with `?scene=build`, `?scene=run`,
 
 ```bash
 npm run typecheck
-npm run dev & sleep 3 && node scripts/smoke.mjs
+npm run dev & sleep 3 && npm run check
 ```
 
-`smoke.mjs` plays the part of Claude and drives a whole run — a loop, a
-classify fan-out, an approval gate, template resolution, and both guard rails.
-If it prints `SMOKE OK`, the server contract still holds.
+`npm run check` is four suites, ~150 assertions, and it exits non-zero when any
+of them fails:
+
+| | what it holds to account |
+|---|---|
+| `smoke.mjs` | the engine, driven over the wire the way Claude drives it — loops, classify fan-out, approval gates, all four failure policies, test mode, fan-out with join, sub-workflows, history clipping, scheduling |
+| `protocol-check.mjs` | what the server claims over MCP: tools, prompts, resources, templates, completions, and the capabilities it deliberately does *not* claim |
+| `export-check.mjs` | a board survives export to a page and back, field for field |
+| `trace-check.mjs` | every shipped example walks the path it claims, and every step in it is reachable |
+
+Every check is an assertion. **A check that only prints is not a check** — this
+suite spent months green while `examples/inbox-triage.json` shipped with a
+filter that dropped every thread it was given, so the run went from the trigger
+straight to the recap and never reached seven of its ten steps. Use the helpers
+in `scripts/expect.mjs` (`ok`, `eq`, `deepEq`, `includes`, `between`) and finish
+with `done()`.
+
+If you change an example on purpose, its trace will no longer match. Look at
+the diff first, then `npm run trace:update` to accept it.
 
 ## What good changes look like
 
@@ -33,7 +49,7 @@ If it prints `SMOKE OK`, the server contract still holds.
 `config` schema a `.describe()` on every field — those descriptions are what
 Claude reads out of `circuit_catalog`, and a vague one produces a vague
 workflow. If the step is performed by Claude rather than settled by Circuit,
-add its directive shape in `src/engine/run.ts` and a line exercising it in
+add its directive shape in `src/engine/run.ts` and an assertion exercising it in
 `scripts/smoke.mjs`.
 
 **Board changes** should come with a harness screenshot in the PR, in both

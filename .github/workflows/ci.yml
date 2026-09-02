@@ -16,20 +16,39 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run typecheck
+
       - name: build the board and the deploy output
         run: npm run build
-      - name: drive a full run over the wire
+
+      # Every check below asserts and exits non-zero on failure. If you are
+      # adding one, put it in scripts/ using the helpers in scripts/expect.mjs —
+      # a check that only prints is not a check.
+      - name: start the server
         run: |
           npm run dev &
           for i in $(seq 1 30); do
             curl -sf http://localhost:8787/health > /dev/null && break
             sleep 1
           done
-          node scripts/smoke.mjs
-          node scripts/protocol-check.mjs
-          node scripts/export-check.mjs
-      - name: the stdio build
-        run: node scripts/stdio-check.mjs
+          curl -sf http://localhost:8787/health
+
+      - name: the engine, driven over the wire
+        run: node scripts/smoke.mjs
+
+      - name: what the server claims over MCP
+        run: node scripts/protocol-check.mjs
+
+      - name: export, import, and the starter boards
+        run: node scripts/export-check.mjs
+
+      - name: every shipped example walks the path it claims
+        run: node scripts/trace-check.mjs
+
+      - name: the packaged stdio build
+        run: |
+          npm run build:node
+          node scripts/stdio-check.mjs
+
       - name: the oauth flow
         run: |
           PORT=8788 PUBLIC_BASE_URL=http://localhost:8788 CIRCUIT_OWNER_KEY=ci-owner-key npm run dev &

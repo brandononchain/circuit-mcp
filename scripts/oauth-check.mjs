@@ -1,21 +1,21 @@
 /* Walks the whole OAuth 2.1 flow the way an MCP client would. */
 import { createHash, randomBytes } from "node:crypto";
+import { ok, section, done } from "./expect.mjs";
 const base = process.env.URL ?? "http://localhost:8788";
 const j = async (r) => ({ status: r.status, body: await r.text() });
-const ok = (label, cond, extra = "") => console.log(`${cond ? "  ok  " : "  ✕   "}${label}${extra ? "  " + extra : ""}`);
 
-/* 1. an unauthenticated call must point at the metadata */
+section("the unauthenticated challenge");
 let r = await fetch(`${base}/mcp`, { method: "POST", headers: { "content-type": "application/json" }, body: "{}" });
 const challenge = r.headers.get("www-authenticate") ?? "";
 ok("401 with resource_metadata", r.status === 401 && challenge.includes("resource_metadata"), challenge.slice(0, 90));
 
-/* 2. metadata documents */
+section("metadata documents");
 const prm = await (await fetch(`${base}/.well-known/oauth-protected-resource`)).json();
 ok("protected-resource metadata", prm.authorization_servers?.length === 1, prm.resource);
 const asm = await (await fetch(`${base}/.well-known/oauth-authorization-server`)).json();
 ok("authorization-server metadata", asm.code_challenge_methods_supported?.includes("S256"), asm.token_endpoint);
 
-/* 3. dynamic client registration */
+section("dynamic client registration");
 const reg = await (await fetch(asm.registration_endpoint, {
   method: "POST", headers: { "content-type": "application/json" },
   body: JSON.stringify({ redirect_uris: ["https://claude.ai/api/mcp/auth_callback"], client_name: "Claude" }),
@@ -28,7 +28,7 @@ const badReg = await fetch(asm.registration_endpoint, {
 });
 ok("refuses non-https redirect", badReg.status === 400);
 
-/* 4. authorize — the consent page, then the wrong key, then the right one */
+section("authorize");
 const verifier = randomBytes(32).toString("base64url");
 const codeChallenge = createHash("sha256").update(verifier).digest("base64url");
 const params = new URLSearchParams({
@@ -55,7 +55,7 @@ const location = new URL(good.headers.get("location"));
 const code = location.searchParams.get("code");
 ok("code issued", good.status === 302 && !!code, `state preserved: ${location.searchParams.get("state") === "xyz"}`);
 
-/* 5. token exchange, and PKCE actually enforced */
+section("token exchange");
 const wrongPkce = await (await fetch(asm.token_endpoint, {
   method: "POST", headers: { "content-type": "application/x-www-form-urlencoded" },
   body: new URLSearchParams({ grant_type: "authorization_code", code, code_verifier: "wrong",
@@ -77,7 +77,7 @@ const replay = await (await fetch(asm.token_endpoint, {
 })).json();
 ok("code is single use", replay.error === "invalid_grant", replay.error_description);
 
-/* 6. the token actually opens /mcp */
+section("using the token");
 const call = await fetch(`${base}/mcp`, {
   method: "POST",
   headers: { "content-type": "application/json", accept: "application/json, text/event-stream",
@@ -92,7 +92,7 @@ const junk = await fetch(`${base}/mcp`, {
   method: "POST", headers: { "content-type": "application/json", authorization: "Bearer forged.token" }, body: "{}" });
 ok("forged token refused", junk.status === 401);
 
-/* 7. refresh */
+section("refresh");
 const ref = await (await fetch(asm.token_endpoint, {
   method: "POST", headers: { "content-type": "application/x-www-form-urlencoded" },
   body: new URLSearchParams({ grant_type: "refresh_token", refresh_token: tok.refresh_token }),
@@ -103,3 +103,5 @@ const notARefresh = await (await fetch(asm.token_endpoint, {
   body: new URLSearchParams({ grant_type: "refresh_token", refresh_token: tok.access_token }),
 })).json();
 ok("access token rejected as refresh", notARefresh.error === "invalid_grant");
+
+done("oauth checks");
