@@ -73,6 +73,31 @@ async function drive(file, scenario) {
   return { trace, visited, wf, run: out.run, last: d };
 }
 
+/**
+ * Bind exactly the connector tools these examples name.
+ *
+ * circuit_run checks every tool.call step against whatever the workspace last
+ * bound, and that binding outlives the script that set it — in Postgres it
+ * outlives the process. Run straight after smoke.mjs, which binds its own five,
+ * and every example reaching for Airtable or Gmail:send_message was refused
+ * before it started. A check has to set up the state it needs instead of
+ * inheriting whatever ran before it.
+ */
+section("connector binding");
+const named = new Set();
+const collect = (node) => {
+  if (Array.isArray(node)) node.forEach(collect);
+  else if (node && typeof node === "object") {
+    if (typeof node.config?.tool === "string") named.add(node.config.tool);
+    Object.values(node).forEach(collect);
+  }
+};
+for (const file of Object.keys(SCENARIOS)) collect(JSON.parse(readFileSync(`examples/${file}`, "utf8")));
+const tools = [...named].sort();
+const bound = await client.callTool({ name: "circuit_bind", arguments: { tools: tools.map((name) => ({ name })) } });
+ok(`the ${tools.length} tools the examples name are bound`, !bound.isError, bound.content?.[0]?.text ?? "");
+note(tools.join(", "));
+
 for (const [file, scenarios] of Object.entries(SCENARIOS)) {
   section(`examples/${file}`);
   const covered = new Set();
