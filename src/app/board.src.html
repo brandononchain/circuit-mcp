@@ -65,6 +65,16 @@ button.ghost{background:transparent}
   font-variant-numeric:tabular-nums;letter-spacing:.02em}
 .vp .div{width:1px;align-self:stretch;background:var(--edge);margin:2px 1px}
 
+/* What you can do here, said once. It leaves the moment you do any of it. */
+.hint{position:absolute;left:10px;bottom:10px;z-index:5;pointer-events:none;
+  font-size:10px;letter-spacing:.02em;color:var(--ink-3);white-space:nowrap;
+  max-width:calc(100% - 150px);overflow:hidden;text-overflow:ellipsis;
+  background:color-mix(in srgb,var(--panel) 78%,transparent);
+  border:1px solid var(--edge);border-radius:4px;padding:4px 8px;
+  backdrop-filter:blur(6px);transition:opacity .45s ease}
+.hint b{font-weight:500;color:var(--ink-2)}
+.hint.gone{opacity:0}
+
 /* Any scroller that does survive wears the board's own colours, never the OS's. */
 *{scrollbar-width:thin;scrollbar-color:var(--edge-hi) transparent}
 ::-webkit-scrollbar{width:9px;height:9px}

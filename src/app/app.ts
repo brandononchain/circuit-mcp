@@ -53,6 +53,8 @@ const view = { x: 0, y: 0, s: 1 };
 let scale = 1;
 /** true once the user has panned or zoomed, so a redraw stops re-framing on them */
 let posed = false;
+/** the gesture hint shows until the user does any of the things it names */
+let hinted = false;
 /** board size in board coordinates */
 const content = { w: 0, h: 0 };
 let wiring: { from: string; port: string; x: number; y: number } | null = null;
@@ -244,7 +246,7 @@ function shell(inner: string, extra = "") {
       <svg id="traces" aria-hidden="true"></svg>
       <span class="silk mono">${wf ? `${esc(wf.id)}` : "circuit"}</span>
       ${inner}
-    </div>${wf ? `<div class="vp">
+    </div>${wf && !hinted ? `<div class="hint" id="vp-hint"><b>Drag</b> to pan · <b>⌘/Ctrl+scroll</b> to zoom · <b>drag a chip</b> to move it · <b>pull a pad</b> to wire</div>` : ""}${wf ? `<div class="vp">
       <button id="vp-out" title="Zoom out" aria-label="Zoom out">−</button>
       <span class="z num" id="vp-z">100%</span>
       <button id="vp-in" title="Zoom in" aria-label="Zoom in">+</button>
@@ -541,6 +543,13 @@ function applyView() {
   if (z) z.textContent = `${Math.round(view.s * 100)}%`;
 }
 
+/** The hint has done its job the moment the user does any of what it describes. */
+function hintUsed() {
+  if (hinted) return;
+  hinted = true;
+  el("vp-hint")?.classList.add("gone");
+}
+
 /** Zoom about a point in viewport coordinates, so the board grows under the cursor. */
 function zoomAt(factor: number, px: number, py: number) {
   const s = Math.max(ZOOM_MIN, Math.min(ZOOM_MAX, view.s * factor));
@@ -550,6 +559,7 @@ function zoomAt(factor: number, px: number, py: number) {
   view.y = py - (py - view.y) * k;
   view.s = s;
   posed = true;
+  hintUsed();
   applyView();
 }
 
@@ -765,6 +775,7 @@ function wire() {
       view.x = ox + (m.clientX - sx);
       view.y = oy + (m.clientY - sy);
       posed = true;
+      hintUsed();
       applyView();
     };
     const up = () => {
@@ -790,7 +801,7 @@ function wire() {
     view.x -= e.deltaX;
     view.y -= e.deltaY;
     applyView();
-    if (view.x !== was.x || view.y !== was.y) { posed = true; e.preventDefault(); }
+    if (view.x !== was.x || view.y !== was.y) { posed = true; hintUsed(); e.preventDefault(); }
   }, { passive: false });
 
   const nameEl = el("wfname");
@@ -867,6 +878,7 @@ function startWire(ev: PointerEvent, handle: HTMLElement) {
   const from = handle.dataset.from!, port = handle.dataset.port ?? "out";
   const x0 = parseFloat(handle.style.left), y0 = parseFloat(handle.style.top);
 
+  hintUsed();
   handle.classList.add("armed");
   canvasEl.classList.add("wiring");
   const draft = document.createElementNS("http://www.w3.org/2000/svg", "path");
@@ -918,6 +930,7 @@ function startDrag(ev: PointerEvent, node: HTMLElement) {
     const dx = (e.clientX - startX) / scale, dy = (e.clientY - startY) / scale;
     if (!moved && (Math.abs(dx) + Math.abs(dy)) * scale < 4) return;
     moved = true;
+    hintUsed();
     const col = Math.max(0, Math.round(from.col + dx / COL_W));
     const lane = Math.max(0, Math.round(from.lane + dy / LANE_H));
     node.style.left = `${PAD_X + col * COL_W}px`;
