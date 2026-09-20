@@ -244,7 +244,7 @@ function shell(inner: string, extra = "") {
     </div>
     <div class="scroll" id="scroll"><div class="canvas" id="canvas">
       <svg id="traces" aria-hidden="true"></svg>
-      <span class="silk mono">${wf ? `${esc(wf.id)}` : "circuit"}</span>
+      <span class="silk mono">${wf ? `${esc(wf.id)}` : "circuit"} \u00b7 build __BUILD__</span>
       ${inner}
     </div>${wf && !hinted ? `<div class="hint" id="vp-hint"><b>Drag</b> to pan · <b>⌘/Ctrl+scroll</b> to zoom · <b>drag a chip</b> to move it · <b>pull a pad</b> to wire</div>` : ""}${wf ? `<div class="vp">
       <button id="vp-out" title="Zoom out" aria-label="Zoom out">−</button>

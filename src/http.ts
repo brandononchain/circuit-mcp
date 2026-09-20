@@ -1,6 +1,7 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { buildServer } from "./server.js";
+import { BOARD_BUILD } from "./app/board.generated.js";
 import { getStore, storeKind, storageIsDurable } from "./store/index.js";
 import {
   authorizationServerMetadata, oauthConfig, ownerKeyMatches, protectedResourceMetadata,
@@ -167,6 +168,9 @@ export async function handle(req: IncomingMessage, res: ServerResponse) {
           + "Set DATABASE_URL to a Postgres connection string to persist.",
       }),
       auth: cfg ? "oauth" : tokenMap().size ? "token" : "open",
+      /* Compare with the build the board prints on itself: same means the client
+       * is current, different means it is showing a cached copy of the app. */
+      board: BOARD_BUILD,
       integrations: "none — Circuit runs on the caller's own connectors",
     }));
   }
