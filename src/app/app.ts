@@ -47,11 +47,16 @@ const app = new AppClient(
 let board: Board | null = null;
 let building: Partial<Chip>[] = [];
 let selected: string | null = null;
-let fitted = true;
-/** whether the board is wider than the panel it is sitting in */
-let overflows = false;
-/** the CSS scale the canvas is currently drawn at (1 unless fitted down) */
+/** Where the board sits under the viewport, and how big it is drawn. */
+const view = { x: 0, y: 0, s: 1 };
+/** the CSS scale the canvas is currently drawn at — wire and drag maths read it */
 let scale = 1;
+/** true once the user has panned or zoomed, so a redraw stops re-framing on them */
+let posed = false;
+/** the gesture hint shows until the user does any of the things it names */
+let hinted = false;
+/** board size in board coordinates */
+const content = { w: 0, h: 0 };
 let wiring: { from: string; port: string; x: number; y: number } | null = null;
 /** index into run.history while replaying, or null when showing the final state */
 let replayAt: number | null = null;
@@ -90,6 +95,9 @@ app.h.ontoolresult = (p: any) => {
     p?.structuredContent ??
     p?._meta?.["ui/props"];
   if (!props || !props.workflow) return;
+  /* A different board gets framed afresh; the same one keeps however the user
+   * has it panned and zoomed. */
+  if (board?.workflow?.id !== (props as Board).workflow?.id) posed = false;
   board = props as Board;
   building = [];
   replayAt = null;
@@ -231,7 +239,6 @@ function shell(inner: string, extra = "") {
       <span class="lab num" id="wfmeta">${esc(meta)}</span>
       <span class="sp"></span>
       ${history().length ? `<button id="btn-replay" class="ghost">${replaying() ? "Latest" : "Replay"}</button>` : ""}
-      ${wf && overflows ? `<button id="btn-fit" class="ghost">${fitted ? "Actual size" : "Fit"}</button>` : ""}
       ${wf ? `<button id="btn-full" class="ghost">Full screen</button>` : ""}
       ${wf?.description ? `<span class="why">${esc(wf.description)}</span>` : ""}
     </div>
@@ -239,7 +246,13 @@ function shell(inner: string, extra = "") {
       <svg id="traces" aria-hidden="true"></svg>
       <span class="silk mono">${wf ? `${esc(wf.id)}` : "circuit"}</span>
       ${inner}
-    </div></div>
+    </div>${wf && !hinted ? `<div class="hint" id="vp-hint"><b>Drag</b> to pan · <b>⌘/Ctrl+scroll</b> to zoom · <b>drag a chip</b> to move it · <b>pull a pad</b> to wire</div>` : ""}${wf ? `<div class="vp">
+      <button id="vp-out" title="Zoom out" aria-label="Zoom out">−</button>
+      <span class="z num" id="vp-z">100%</span>
+      <button id="vp-in" title="Zoom in" aria-label="Zoom in">+</button>
+      <span class="div"></span>
+      <button id="vp-fit" title="Frame the whole board">Fit</button>
+    </div>` : ""}</div>
     <div class="console">
       <div class="rail">
         <div style="display:flex;align-items:center;gap:7px">
@@ -453,45 +466,101 @@ function needsBus(steps: Chip[]): boolean {
   return steps.some((s) => s.next.some((w) => Math.abs((col.get(w.to) ?? 0) - (col.get(s.id) ?? 0)) > 1.6));
 }
 
+const VIEW_MIN_H = 240, VIEW_MAX_H = 560, ZOOM_MIN = 0.35, ZOOM_MAX = 2;
+
 function sizeCanvas(steps: Chip[]) {
   const maxCol = Math.max(0, ...steps.map((s) => s.position?.col ?? 0));
   const maxLane = Math.max(0, ...steps.map((s) => s.position?.lane ?? 0));
   const c = el("canvas")!;
-  const w = PAD_X * 2 + maxCol * COL_W + NODE_W;
+  content.w = PAD_X * 2 + maxCol * COL_W + NODE_W;
   // only leave room under the board when something actually runs down there
-  const h = PAD_Y * 2 + maxLane * LANE_H + (needsBus(steps) ? 172 : 126);
-  c.style.minWidth = `${w}px`;
-  c.style.height = `${h}px`;
-  applyFit(w, h);
+  content.h = PAD_Y * 2 + maxLane * LANE_H + (needsBus(steps) ? 172 : 126);
+  c.style.width = `${content.w}px`;
+  c.style.height = `${content.h}px`;
+  posed ? applyView() : fitView();
 }
 
-/** "Fit" shrinks a wide board to the panel rather than making you scroll it. */
-function applyFit(w: number, h: number) {
-  const c = el("canvas") as HTMLElement | null;
+const isFull = () => app.hostContext().displayMode === "fullscreen";
+
+/**
+ * How tall the viewport itself is. Inline it takes the board's own shape within
+ * sane bounds, so a three-chip board is not given a hall to sit in and a forty
+ * chip one does not push the conversation off the screen. Full screen it takes
+ * whatever is left after the chrome.
+ */
+function viewportHeight(availW: number): number {
+  if (isFull()) {
+    const h = (sel: string) => (document.querySelector(sel) as HTMLElement | null)?.offsetHeight ?? 0;
+    return Math.max(VIEW_MIN_H, window.innerHeight - h(".bar") - h(".console") - h(".gate") - 2);
+  }
+  const natural = content.h * Math.min(1, availW / Math.max(1, content.w));
+  return Math.round(Math.min(VIEW_MAX_H, Math.max(VIEW_MIN_H, natural)));
+}
+
+/** Frame the whole board, centred. The default view, and what "Fit" returns to. */
+function fitView() {
   const wrap = el("scroll") as HTMLElement | null;
-  if (!c || !wrap) return;
-  const was = overflows;
-  overflows = w > wrap.clientWidth - 2;
-  if (was !== overflows) requestAnimationFrame(() => { if (board) render(); });
-  if (!fitted) {
-    scale = 1;
-    c.style.transform = "";
-    c.style.transformOrigin = "";
-    wrap.style.height = "";
-    wrap.style.overflowX = "auto";
-    return;
-  }
-  const s = Math.min(1, (wrap.clientWidth - 2) / w);
-  if (s >= 1) {
-    scale = 1;
-    c.style.transform = ""; wrap.style.height = ""; wrap.style.overflowX = "auto";
-    return;
-  }
-  scale = s;
-  c.style.transformOrigin = "0 0";
-  c.style.transform = `scale(${s})`;
-  wrap.style.height = `${Math.ceil(h * s)}px`;
-  wrap.style.overflowX = "hidden";
+  if (!wrap) return;
+  const availW = wrap.clientWidth || wrap.parentElement?.clientWidth || 600;
+  const vh = viewportHeight(availW);
+  wrap.style.height = `${vh}px`;
+  const s = Math.min(1, (availW - 16) / content.w, (vh - 16) / content.h);
+  view.s = Math.max(ZOOM_MIN, s);
+  view.x = Math.round((availW - content.w * view.s) / 2);
+  view.y = Math.round((vh - content.h * view.s) / 2);
+  applyView();
+}
+
+/**
+ * Pan is unbounded in spirit but never loses the board: whatever you do, this
+ * much of it stays on screen, so there is no way to end up looking at nothing
+ * and no way to strand a chip somewhere you cannot reach.
+ */
+function clampView() {
+  const wrap = el("scroll") as HTMLElement | null;
+  if (!wrap) return;
+  const keep = 80;
+  const vw = wrap.clientWidth, vh = wrap.clientHeight;
+  const cw = content.w * view.s, ch = content.h * view.s;
+  view.x = Math.min(vw - keep, Math.max(keep - cw, view.x));
+  view.y = Math.min(vh - keep, Math.max(keep - ch, view.y));
+}
+
+function applyView() {
+  const wrap = el("scroll") as HTMLElement | null;
+  const c = el("canvas") as HTMLElement | null;
+  if (!wrap || !c) return;
+  if (!wrap.style.height) wrap.style.height = `${viewportHeight(wrap.clientWidth || 600)}px`;
+  clampView();
+  scale = view.s;
+  c.style.transform = `translate(${view.x}px,${view.y}px) scale(${view.s})`;
+  /* The grid belongs to the world, not the frame, so it travels with the board
+   * and stays put relative to the chips sitting on it. */
+  const g = 22 * view.s;
+  wrap.style.backgroundSize = `${g}px ${g}px`;
+  wrap.style.backgroundPosition = `${view.x + 8 * view.s}px ${view.y + 8 * view.s}px`;
+  const z = el("vp-z");
+  if (z) z.textContent = `${Math.round(view.s * 100)}%`;
+}
+
+/** The hint has done its job the moment the user does any of what it describes. */
+function hintUsed() {
+  if (hinted) return;
+  hinted = true;
+  el("vp-hint")?.classList.add("gone");
+}
+
+/** Zoom about a point in viewport coordinates, so the board grows under the cursor. */
+function zoomAt(factor: number, px: number, py: number) {
+  const s = Math.max(ZOOM_MIN, Math.min(ZOOM_MAX, view.s * factor));
+  if (s === view.s) return;
+  const k = s / view.s;
+  view.x = px - (px - view.x) * k;
+  view.y = py - (py - view.y) * k;
+  view.s = s;
+  posed = true;
+  hintUsed();
+  applyView();
 }
 
 /*
@@ -658,8 +727,17 @@ function drawTraces(steps: Chip[]) {
 }
 
 /* ------------------------------------------------------------ interaction */
+/** Re-frame on a resize, unless the user has posed the view themselves. */
+let watchingViewport = false;
+function watchViewport() {
+  if (watchingViewport) return;
+  watchingViewport = true;
+  window.addEventListener("resize", () => { posed ? applyView() : fitView(); });
+}
+
 function wire() {
   const wf = board?.workflow;
+  watchViewport();
 
   el("btn-replay")?.addEventListener("click", () => {
     replayAt = replaying() ? null : 0;
@@ -674,13 +752,57 @@ function wire() {
   });
 
   el("btn-full")?.addEventListener("click", () => app.requestDisplayMode("fullscreen").catch(() => {}));
-  el("btn-fit")?.addEventListener("click", () => { fitted = !fitted; render(); });
 
-  // clicking the board itself clears the selection
-  el("canvas")?.addEventListener("pointerdown", (e) => {
-    if ((e.target as HTMLElement).closest(".node")) return;
-    if (selected) { selected = null; render(); }
+  const wrap = el("scroll") as HTMLElement | null;
+  const centre = () => [ (wrap?.clientWidth ?? 0) / 2, (wrap?.clientHeight ?? 0) / 2 ] as const;
+  el("vp-in")?.addEventListener("click", () => zoomAt(1.2, ...centre()));
+  el("vp-out")?.addEventListener("click", () => zoomAt(1 / 1.2, ...centre()));
+  el("vp-fit")?.addEventListener("click", () => { posed = false; fitView(); });
+
+  /* Grab the board anywhere that is not a chip and drag it. A click that never
+   * became a drag is still a click on the background, so it clears the
+   * selection the way it always did. */
+  wrap?.addEventListener("pointerdown", (e) => {
+    if ((e.target as HTMLElement).closest(".node,.handle,.cut,.vp")) return;
+    if (e.button !== 0 && e.button !== 1) return;
+    e.preventDefault();
+    const sx = e.clientX, sy = e.clientY, ox = view.x, oy = view.y;
+    let travelled = 0;
+    wrap.setPointerCapture(e.pointerId);
+    wrap.classList.add("panning");
+    const move = (m: PointerEvent) => {
+      travelled = Math.abs(m.clientX - sx) + Math.abs(m.clientY - sy);
+      view.x = ox + (m.clientX - sx);
+      view.y = oy + (m.clientY - sy);
+      posed = true;
+      hintUsed();
+      applyView();
+    };
+    const up = () => {
+      wrap.classList.remove("panning");
+      wrap.removeEventListener("pointermove", move);
+      wrap.removeEventListener("pointerup", up);
+      if (travelled < 4 && selected) { selected = null; render(); }
+    };
+    wrap.addEventListener("pointermove", move);
+    wrap.addEventListener("pointerup", up);
   });
+
+  wrap?.addEventListener("wheel", (e) => {
+    if (e.ctrlKey || e.metaKey) {
+      const r = wrap.getBoundingClientRect();
+      e.preventDefault();
+      return zoomAt(e.deltaY < 0 ? 1.12 : 1 / 1.12, e.clientX - r.left, e.clientY - r.top);
+    }
+    /* Wheel and trackpad pan the board — but only while it still has somewhere
+     * to go. At the edge the gesture is handed back to the page, so a board
+     * sitting in a conversation never traps the transcript's own scroll. */
+    const was = { x: view.x, y: view.y };
+    view.x -= e.deltaX;
+    view.y -= e.deltaY;
+    applyView();
+    if (view.x !== was.x || view.y !== was.y) { posed = true; hintUsed(); e.preventDefault(); }
+  }, { passive: false });
 
   const nameEl = el("wfname");
   nameEl?.addEventListener("blur", () => {
@@ -756,6 +878,7 @@ function startWire(ev: PointerEvent, handle: HTMLElement) {
   const from = handle.dataset.from!, port = handle.dataset.port ?? "out";
   const x0 = parseFloat(handle.style.left), y0 = parseFloat(handle.style.top);
 
+  hintUsed();
   handle.classList.add("armed");
   canvasEl.classList.add("wiring");
   const draft = document.createElementNS("http://www.w3.org/2000/svg", "path");
@@ -807,6 +930,7 @@ function startDrag(ev: PointerEvent, node: HTMLElement) {
     const dx = (e.clientX - startX) / scale, dy = (e.clientY - startY) / scale;
     if (!moved && (Math.abs(dx) + Math.abs(dy)) * scale < 4) return;
     moved = true;
+    hintUsed();
     const col = Math.max(0, Math.round(from.col + dx / COL_W));
     const lane = Math.max(0, Math.round(from.lane + dy / LANE_H));
     node.style.left = `${PAD_X + col * COL_W}px`;
