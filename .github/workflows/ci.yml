@@ -68,6 +68,11 @@ jobs:
       - name: every shipped example walks the path it claims
         run: node scripts/trace-check.mjs
 
+      # A bundle that builds is not a bundle that runs. This imports the Vercel
+      # function and serves a request through it.
+      - name: the vercel function bundle loads and answers
+        run: node scripts/bundle-check.mjs
+
       - name: the packaged stdio build
         run: |
           npm run build:node

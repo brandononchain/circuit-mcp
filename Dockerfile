@@ -10,9 +10,9 @@ RUN npm ci
 COPY tsconfig.json ./
 COPY scripts ./scripts
 COPY src ./src
-# Inlines the board into a single self-contained ui:// resource, then bundles
-# the server to one file so the runtime image needs no node_modules of its own.
-RUN npm run build:app && npm run build:server
+# build:server already inlines the board into a single self-contained ui://
+# resource before bundling, so this is one step, not two.
+RUN npm run build:server
 
 FROM node:22-slim AS runtime
 WORKDIR /app
