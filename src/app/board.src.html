@@ -44,10 +44,35 @@ button:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
 button.primary{background:var(--accent);border-color:var(--accent);color:var(--board)}
 button.ghost{background:transparent}
 
-.scroll{overflow-x:auto;overflow-y:hidden}
-.canvas{position:relative;min-height:200px;
+/* The viewport. Nothing scrolls here — the canvas is panned and zoomed under
+ * it, so every part of a board is reachable at any panel size and no native
+ * scrollbar ever appears over the artwork. */
+.scroll{position:relative;overflow:hidden;touch-action:none;cursor:grab;
   background-image:radial-gradient(var(--grid) 1px,transparent 1px);
   background-size:22px 22px;background-position:8px 8px}
+.scroll.panning{cursor:grabbing}
+.scroll.panning .node{transition:none}
+.canvas{position:absolute;left:0;top:0;transform-origin:0 0;min-height:200px}
+
+/* viewport controls — bottom right, out of the way of the board */
+.vp{position:absolute;right:10px;bottom:10px;z-index:6;display:flex;gap:4px;align-items:center;
+  padding:3px;border-radius:4px;background:color-mix(in srgb,var(--panel) 82%,transparent);
+  border:1px solid var(--edge);backdrop-filter:blur(6px)}
+.vp button{padding:3px 7px;font-size:11px;letter-spacing:.04em;text-transform:none;
+  background:transparent;border:0;color:var(--ink-3);border-radius:3px;min-width:24px}
+.vp button:hover{color:var(--ink);background:var(--chip-2)}
+.vp .z{font-size:10px;color:var(--ink-3);min-width:34px;text-align:center;
+  font-variant-numeric:tabular-nums;letter-spacing:.02em}
+.vp .div{width:1px;align-self:stretch;background:var(--edge);margin:2px 1px}
+
+/* Any scroller that does survive wears the board's own colours, never the OS's. */
+*{scrollbar-width:thin;scrollbar-color:var(--edge-hi) transparent}
+::-webkit-scrollbar{width:9px;height:9px}
+::-webkit-scrollbar-track{background:transparent}
+::-webkit-scrollbar-thumb{background:var(--edge-hi);border-radius:5px;
+  border:2px solid transparent;background-clip:content-box}
+::-webkit-scrollbar-thumb:hover{background:var(--ink-3);background-clip:content-box}
+::-webkit-scrollbar-corner{background:transparent}
 .canvas svg{position:absolute;inset:0;width:100%;height:100%;overflow:visible;pointer-events:none}
 .trace{fill:none;stroke:var(--trace);stroke-width:1.7;stroke-linejoin:miter}
 .trace.hot{stroke:var(--accent);stroke-width:1.9}
